@@ -1,18 +1,19 @@
 """MCP 工具（graph 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def call_graph(identifier: str, depth: int = 2, direction: str = "callees") -> str:
+def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
+               f: str = None) -> str:
     """Build a call graph from a function up to N levels. direction is 'callees'
     (functions it calls), 'callers' (functions that call it), or 'both'.
     identifier accepts a name, hex address, or integer. Node count is capped;
     use small depth for large binaries."""
+    r = _route_if_remote(f, "call_graph", identifier=identifier,
+                         depth=depth, direction=direction)
+    if r: return r
     try:
         root = resolve_identifier(identifier)
         root = _func_start(root) or root
@@ -21,8 +22,8 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees") -> s
                 "message": "direction must be callees/callers/both"}})
         depth = max(1, min(depth, CALLGRAPH_MAX_DEPTH))
 
-        nodes = {}          # ea -> name
-        edges = []          # {from, to}
+        nodes = {}
+        edges = []
         seen_edges = set()
         truncated = False
 
@@ -77,10 +78,14 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees") -> s
 
 
 @mcp.tool()
-def function_reachability(source: str, target: str, max_depth: int = 6) -> str:
+def function_reachability(source: str, target: str, max_depth: int = 6,
+                          f: str = None) -> str:
     """Determine whether the source function can reach the target function via
     call edges, and return one call path if so. Both accept name, hex address,
     or integer. Uses bounded BFS; increase max_depth for deep call chains."""
+    r = _route_if_remote(f, "function_reachability",
+                         source=source, target=target, max_depth=max_depth)
+    if r: return r
     try:
         src = _func_start(resolve_identifier(source))
         dst = _func_start(resolve_identifier(target))
@@ -89,7 +94,6 @@ def function_reachability(source: str, target: str, max_depth: int = 6) -> str:
                 "message": "source or target is not inside a function"}})
         max_depth = max(1, min(max_depth, CALLGRAPH_MAX_DEPTH + 5))
 
-        # BFS，记录前驱以重建路径
         from collections import deque
         visited = {src}
         parent = {}
@@ -119,7 +123,6 @@ def function_reachability(source: str, target: str, max_depth: int = 6) -> str:
                 "target": ea_to_hex(dst),
                 "searched_depth": max_depth,
             })
-        # 重建路径
         path = [dst]
         while path[-1] != src:
             path.append(parent[path[-1]])
@@ -142,11 +145,7 @@ def function_reachability(source: str, target: str, max_depth: int = 6) -> str:
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# 意图工具（intent tools）——一次调用聚合"完成一个 LLM 认知任务"所需的最小完备证据集。
-# 只给确定性证据（不含 has_crypto/score 之类语义结论），语义判断留给 LLM。
-# 全部为 Layer 3 纯组合，复用已有原子/辅助，不新增 Layer 2 原子。
-# ---------------------------------------------------------------------------
-INTENT_CALLEE_LIMIT = 40
-INTENT_CALLER_LIMIT = 20
-INTENT_STRING_LIMIT = 40
+_ALL_TOOLS.update({
+    "call_graph": call_graph,
+    "function_reachability": function_reachability,
+})

@@ -1,26 +1,26 @@
 """MCP 工具（intent 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
+def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
+                     f: str = None) -> str:
     """Understand what a single function does, in one call. Aggregates everything
     needed to reason about it: pseudocode, callees (each tagged as import and with
     a deterministic category like crypto/network if known), callers, referenced
     strings, and structural features. Prefer this over calling analyze_function +
     decompile + search separately. Categories are deterministic name-table hints,
     NOT semantic conclusions — you decide what the function actually does."""
+    r = _route_if_remote(f, "explore_function",
+                         identifier=identifier, max_lines=max_lines)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         info = api.get_func_info(ea)
         start_ea = info["ea"]
 
-        # 伪代码（截断可见）
         try:
             code = api.decompile(start_ea)
             pseudocode, total_lines, truncated = _truncate_lines(code, max_lines)
@@ -30,7 +30,6 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
             else:
                 raise
 
-        # callees：标注是否导入 + 确定性分类提示
         import_names = {imp["name"] for imp in api.get_imports()}
         callees = []
         for c in api.get_func_callees(start_ea)[:INTENT_CALLEE_LIMIT]:
@@ -42,7 +41,6 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
                 "category": cat.lower() if cat else None,
             })
 
-        # callers（去重 + 过滤非函数）
         caller_map = {}
         for c in api.get_func_callers(start_ea):
             key = c["from_func_ea"]
@@ -55,7 +53,6 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
                                    "ea": ea_to_hex(key), "call_count": 1}
         callers = list(caller_map.values())[:INTENT_CALLER_LIMIT]
 
-        # 引用字符串
         seen_str = {}
         for sr in api.get_func_string_refs(start_ea):
             seen_str.setdefault(sr["string_ea"],
@@ -63,7 +60,6 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
                                  "ea": ea_to_hex(sr["string_ea"])})
         referenced_strings = list(seen_str.values())[:INTENT_STRING_LIMIT]
 
-        # features（确定性事实）
         FUNC_LIB = 0x00000004
         features = {"is_library": bool(info["flags"] & FUNC_LIB),
                     "basic_block_count": None, "cyclomatic_complexity": None,
@@ -80,7 +76,6 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
             features["has_loops"] = any(
                 any(s <= b["start"] for s in b["succs"]) for b in blocks)
 
-        # 汇总出现的确定性类别（提示信号，非结论）
         categories = sorted({c["category"] for c in callees if c["category"]})
 
         return format_output({
@@ -101,7 +96,7 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
 
 
 @mcp.tool()
-def explore_data(identifier: str) -> str:
+def explore_data(identifier: str, f: str = None) -> str:
     """Understand a data address or global variable in one call: its name, type,
     raw byte preview (and decoded string if applicable), containing segment, and
     — crucially — which functions READ it versus WRITE it (reference kind is
@@ -109,28 +104,26 @@ def explore_data(identifier: str) -> str:
     role and data flow. Complements trace_data: this gives a data-centric
     profile (type/value/read-write); trace_data drills into each reference site's
     code. Categories/roles are for you to infer; the tool only reports facts."""
+    r = _route_if_remote(f, "explore_data", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
 
-        # 名称
         try:
             name = api.get_name(ea)["name"]
         except IDAError:
             name = ""
 
-        # 类型
         try:
             dtype = api.get_data_type(ea)["type"]
         except IDAError:
             dtype = ""
 
-        # 字节预览
         try:
             byte_hex = api.get_bytes(ea, DATA_BYTES_PREVIEW)["hex_bytes"]
         except IDAError:
             byte_hex = ""
 
-        # 若该地址是字符串，给出解码值（复用 get_strings 匹配同一 ea，避免改字节）
         string_value = None
         try:
             for s in api.get_strings():
@@ -140,10 +133,8 @@ def explore_data(identifier: str) -> str:
         except IDAError:
             pass
 
-        # 所属段
         segment = _segment_of(ea)
 
-        # 引用按读/写/取址分类（与 trace_data 的差异化重点）
         readers, writers, addr_taken, other = [], [], [], []
         total_refs = 0
         try:
@@ -196,22 +187,25 @@ def explore_data(identifier: str) -> str:
         })
     except IDAError as e:
         return error_result(e)
+
+
 @mcp.tool()
-def survey_capabilities() -> str:
+def survey_capabilities(f: str = None) -> str:
     """Build a behavioral profile of the whole binary: imports grouped by
     deterministic capability category (crypto/network/file/process/registry/
     anti_debug/kernel_*), and for each imported API the functions that call it.
     Use to answer 'what can this program do and where'. Categories are
     deterministic name-table hints, NOT verdicts — you decide if the behavior is
     malicious/benign. This is one call instead of binary_overview + many searches."""
+    r = _route_if_remote(f, "survey_capabilities")
+    if r: return r
     try:
         imports = api.get_imports()
-        # 按类别分桶；每个导入补上"调用它的函数"（去重，最多 5 个）
         buckets = {}
         for imp in imports:
             cat = categorize_import(imp["name"])
             if not cat:
-                continue   # OTHER 不进能力画像，减噪；用 binary_overview 看全量
+                continue
             entry = {"api": imp["name"], "called_by": []}
             try:
                 refs = api.get_xrefs_to(imp["ea"])
@@ -228,7 +222,6 @@ def survey_capabilities() -> str:
                     break
             buckets.setdefault(cat.lower(), []).append(entry)
 
-        # 汇总每类的"涉及函数"并集，方便 LLM 定位热点
         summary = {}
         for cat, entries in buckets.items():
             funcs = sorted({f for e in entries for f in e["called_by"]})
@@ -247,11 +240,14 @@ def survey_capabilities() -> str:
 
 
 @mcp.tool()
-def review_string_usage(query: str, limit: int = 15) -> str:
+def review_string_usage(query: str, limit: int = 15, f: str = None) -> str:
     """Find strings matching a query and show HOW they are used: for each match,
     the functions that reference it plus a short pseudocode snippet of the first
     referencing function. Use to answer 'where is this string used and why'
     without manually chaining search + trace_data + decompile."""
+    r = _route_if_remote(f, "review_string_usage",
+                         query=query, limit=limit)
+    if r: return r
     try:
         q = query.lower()
         matches = []
@@ -259,7 +255,6 @@ def review_string_usage(query: str, limit: int = 15) -> str:
             if q in s["value"].lower():
                 matches.append(s)
         total = len(matches)
-        # 排序：完全匹配 > 前缀 > 包含
         def rank(v):
             vl = v.lower()
             return (0 if vl == q else 1 if vl.startswith(q) else 2, len(v))
@@ -273,19 +268,14 @@ def review_string_usage(query: str, limit: int = 15) -> str:
                 refs = []
             ref_funcs = []
             seen = set()
-            first_func_ea = None
             for ref in refs:
                 cf = _containing_function(ref["from_ea"])
                 if cf:
-                    if first_func_ea is None:
-                        first_func_ea = resolve_identifier(cf["name"]) \
-                            if cf.get("name") else None
                     if cf["name"] not in seen:
                         seen.add(cf["name"])
                         ref_funcs.append(cf["name"])
                 if len(ref_funcs) >= 5:
                     break
-            # 第一个引用函数的伪代码片段
             snippet = ""
             if ref_funcs:
                 try:
@@ -310,5 +300,9 @@ def review_string_usage(query: str, limit: int = 15) -> str:
         return error_result(e)
 
 
-DATA_XREF_LIMIT = 20
-DATA_BYTES_PREVIEW = 16
+_ALL_TOOLS.update({
+    "explore_function": explore_function,
+    "explore_data": explore_data,
+    "survey_capabilities": survey_capabilities,
+    "review_string_usage": review_string_usage,
+})

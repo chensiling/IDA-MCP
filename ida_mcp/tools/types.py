@@ -1,17 +1,16 @@
 """MCP 工具（types 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def list_types(name_filter: str = "", limit: int = 100) -> str:
+def list_types(name_filter: str = "", limit: int = 100, f: str = None) -> str:
     """List the local types (structs, unions, enums, typedefs) defined in the IDB.
     Use name_filter to search by substring (case-insensitive) — recommended, as
     IDBs often have thousands of types. Returns ordinal, name, and kind."""
+    r = _route_if_remote(f, "list_types", name_filter=name_filter, limit=limit)
+    if r: return r
     try:
         types = api.list_local_types(name_filter or None)
         total = len(types)
@@ -25,11 +24,14 @@ def list_types(name_filter: str = "", limit: int = 100) -> str:
     except IDAError as e:
         return error_result(e)
 
+
 @mcp.tool()
-def get_type(name: str) -> str:
+def get_type(name: str, f: str = None) -> str:
     """Get the full definition of a named type (struct/union/enum/typedef):
     its C definition, size, and members (with offsets/values). Use before
     applying a type or to understand a data structure."""
+    r = _route_if_remote(f, "get_type", name=name)
+    if r: return r
     try:
         return format_output(api.get_type(name))
     except IDAError as e:
@@ -37,10 +39,12 @@ def get_type(name: str) -> str:
 
 
 @mcp.tool()
-def create_type(c_declaration: str) -> str:
+def create_type(c_declaration: str, f: str = None) -> str:
     """Create or update local type(s) from a C declaration (e.g.
     'struct Foo { int a; char *b; };' or 'typedef ... ;' or an enum). Accepts
     multiple declarations. The types then become applyable via apply_type."""
+    r = _route_if_remote(f, "create_type", c_declaration=c_declaration)
+    if r: return r
     try:
         return format_output(api.create_type(c_declaration))
     except IDAError as e:
@@ -48,9 +52,11 @@ def create_type(c_declaration: str) -> str:
 
 
 @mcp.tool()
-def delete_type(name: str) -> str:
+def delete_type(name: str, f: str = None) -> str:
     """Delete a named type from the IDB's Local Types. Use to remove a
     struct/union/enum/typedef you no longer need."""
+    r = _route_if_remote(f, "delete_type", name=name)
+    if r: return r
     try:
         return format_output(api.delete_type(name))
     except IDAError as e:
@@ -58,10 +64,12 @@ def delete_type(name: str) -> str:
 
 
 @mcp.tool()
-def apply_type(identifier: str, c_type: str) -> str:
+def apply_type(identifier: str, c_type: str, f: str = None) -> str:
     """Apply a C type to a data address or variable (e.g. c_type='MY_STRUCT' or
     'int[4]'). identifier accepts a name, hex address, or integer. Use to lay a
     struct/array over raw data."""
+    r = _route_if_remote(f, "apply_type", identifier=identifier, c_type=c_type)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.apply_type(ea, c_type)
@@ -72,10 +80,12 @@ def apply_type(identifier: str, c_type: str) -> str:
 
 
 @mcp.tool()
-def get_function_prototype(identifier: str) -> str:
+def get_function_prototype(identifier: str, f: str = None) -> str:
     """Get a function's prototype (signature) string. identifier accepts a
     function name, hex address, or integer. Use to inspect argument/return types
     before refining them."""
+    r = _route_if_remote(f, "get_function_prototype", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.get_func_prototype(ea)
@@ -86,10 +96,14 @@ def get_function_prototype(identifier: str) -> str:
 
 
 @mcp.tool()
-def set_function_prototype(identifier: str, prototype: str) -> str:
+def set_function_prototype(identifier: str, prototype: str,
+                           f: str = None) -> str:
     """Set a function's prototype from a C declaration (e.g.
     'int __fastcall f(int argc, char **argv);'). identifier accepts a name, hex
     address, or integer. Improves decompilation by fixing argument types."""
+    r = _route_if_remote(f, "set_function_prototype",
+                         identifier=identifier, prototype=prototype)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         return format_output(api.set_func_prototype(ea, prototype))
@@ -97,6 +111,12 @@ def set_function_prototype(identifier: str, prototype: str) -> str:
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# Hex-Rays 深化工具（批次 B）
-# ---------------------------------------------------------------------------
+_ALL_TOOLS.update({
+    "list_types": list_types,
+    "get_type": get_type,
+    "create_type": create_type,
+    "delete_type": delete_type,
+    "apply_type": apply_type,
+    "get_function_prototype": get_function_prototype,
+    "set_function_prototype": set_function_prototype,
+})

@@ -1,17 +1,16 @@
 """MCP 工具（overview 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def binary_overview() -> str:
+def binary_overview(f: str = None) -> str:
     """Get a high-level overview of the loaded binary: entry point with decompiled
     preview, imports grouped by category, notable strings with references, and
     section layout. Call this first when starting analysis of a new binary."""
+    r = _route_if_remote(f, "binary_overview")
+    if r: return r
     try:
         entry = api.get_entry_point()
         imports = api.get_imports()
@@ -27,7 +26,7 @@ def binary_overview() -> str:
         grouped = {}
         for imp in imports:
             grouped.setdefault(categorize_import(imp["name"]) or "OTHER",
-                               []).append(imp["name"])
+                                []).append(imp["name"])
 
         candidates = []
         for s in strings:
@@ -45,8 +44,8 @@ def binary_overview() -> str:
                 except IDAError:
                     referenced_by = ea_to_hex(first)
             candidates.append({"value": s["value"], "length": s["length"],
-                               "ref_count": len(refs),
-                               "referenced_by": referenced_by})
+                                "ref_count": len(refs),
+                                "referenced_by": referenced_by})
         candidates.sort(key=lambda c: c["ref_count"], reverse=True)
         strings_truncated = len(candidates) > STRINGS_LIMIT
         strings_of_interest = [
@@ -75,10 +74,12 @@ def binary_overview() -> str:
 
 
 @mcp.tool()
-def binary_info() -> str:
+def binary_info(f: str = None) -> str:
     """Get low-level binary metadata: file name, file format, processor,
     bitness, endianness, image base, entry point, and address range. Complements
     binary_overview (which focuses on imports/strings/sections)."""
+    r = _route_if_remote(f, "binary_info")
+    if r: return r
     try:
         info = api.get_binary_info()
         for k in ("image_base", "min_ea", "max_ea", "entry_ea"):
@@ -90,10 +91,12 @@ def binary_info() -> str:
 
 
 @mcp.tool()
-def check_connection() -> str:
+def check_connection(f: str = None) -> str:
     """Check whether IDA has a binary loaded and the MCP server is responsive.
     Use this first if other tools misbehave, to confirm the analysis session is
     ready."""
+    r = _route_if_remote(f, "check_connection")
+    if r: return r
     try:
         entry = api.get_entry_point()
         return format_output({"connected": True,
@@ -101,9 +104,37 @@ def check_connection() -> str:
                                               "name": entry["name"]}})
     except IDAError as e:
         return format_output({"connected": True,
-                              "error": {"code": e.code, "message": translate_error(e)}})
+                              "error": {"code": e.code,
+                                        "message": translate_error(e)}})
 
 
-# ---------------------------------------------------------------------------
-# 类型系统工具（批次 A）
-# ---------------------------------------------------------------------------
+@mcp.tool()
+def list_files() -> str:
+    """List all connected IDA instances (files) in this multi-instance session.
+    Returns each file's id, name, architecture, bitness, and path. Use when
+    multiple IDA instances are connected to discover available targets. The
+    returned 'f' values can be passed to other tools' 'f' parameter."""
+    router = _get_router()
+    if router is None:
+        return format_output({
+            "files": [],
+            "note": "Multi-instance support is not active. "
+                    "This is the only IDA instance."
+        })
+    try:
+        entries = router.registry.list_all()
+        files = [[e.fid, e.name, e.arch, e.bits, e.path] for e in entries]
+        return format_output({
+            "count": len(files),
+            "files": files,
+        })
+    except IDAError as e:
+        return error_result(e)
+
+
+_ALL_TOOLS.update({
+    "binary_overview": binary_overview,
+    "binary_info": binary_info,
+    "check_connection": check_connection,
+    "list_files": list_files,
+})

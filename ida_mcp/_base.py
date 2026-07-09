@@ -8,9 +8,22 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from . import ida_api as api
-from .ida_api import IDAError
-from .categories import categorize_import
+try:
+    from . import ida_api as api
+    from .ida_api import IDAError
+except ImportError:
+    api = None
+
+    class IDAError(Exception):
+        def __init__(self, code, message):
+            super().__init__(message)
+            self.code = code
+
+try:
+    from .categories import categorize_import
+except ImportError:
+    def categorize_import(name):
+        return None
 
 # tools/ 各域用 `from .._base import *` 引入共享项。显式声明 __all__，
 # 确保下划线前缀的辅助函数（import * 默认跳过）也被导出。
@@ -19,6 +32,7 @@ __all__ = [
     "api", "IDAError", "categorize_import",
     # 实例与常量
     "mcp", "HTTP_HOST", "HTTP_PORT",
+    "INTERNAL_PORT",
     "DEFAULT_MAX_LINES", "DEFAULT_SEARCH_LIMIT", "DEFAULT_XREF_LIMIT",
     "DEFAULT_XREF_LIGHT_LIMIT", "STRING_MIN_LENGTH", "STRINGS_LIMIT",
     "ENTRY_PREVIEW_LINES", "CONTEXT_PREVIEW_LINES", "BADADDR",
@@ -33,6 +47,9 @@ __all__ = [
     "_truncate_lines", "_decompile_or_disasm", "_try_parse_int",
     "_containing_function", "_suggest_name", "_func_start",
     "_callees_of", "_callers_of", "_segment_of",
+    # 多实例
+    "_ALL_TOOLS", "_MULTI_ROUTER", "get_file_id", "_route_if_remote",
+    "_get_router",
 ]
 
 # ---------------------------------------------------------------------------
@@ -40,6 +57,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 HTTP_HOST = "127.0.0.1"
 HTTP_PORT = 8765
+INTERNAL_PORT = 8766
 
 DEFAULT_MAX_LINES = 200
 DEFAULT_SEARCH_LIMIT = 30
@@ -54,6 +72,29 @@ CONTEXT_PREVIEW_LINES = 20
 BADADDR = 0xFFFFFFFFFFFFFFFF
 
 mcp = FastMCP("ida-mcp", host=HTTP_HOST, port=HTTP_PORT)
+
+# ---- 多实例：工具注册表与路由器 ----
+_ALL_TOOLS = {}
+_MULTI_ROUTER = None
+
+
+def _get_router():
+    return _MULTI_ROUTER
+
+
+def get_file_id(path):
+    import hashlib
+    return hashlib.sha256(path.encode('utf-8')).hexdigest()[:8]
+
+
+def _route_if_remote(f, tool_name, **kwargs):
+    if f is None:
+        return ""
+    router = _get_router()
+    if router is None:
+        return ""
+    result = router.dispatch(tool_name, f, kwargs)
+    return format_output(result)
 
 
 # ---------------------------------------------------------------------------

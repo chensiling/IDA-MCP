@@ -1,18 +1,19 @@
 """MCP 工具（functions 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
+def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
+                     f: str = None) -> str:
     """Deeply analyze a single function: decompiled pseudocode, call relationships,
     referenced strings, and structural features. Use when you need full context
     about a specific function. Accepts function name, address (hex string like
     "0x401000"), or integer."""
+    r = _route_if_remote(f, "analyze_function",
+                         identifier=identifier, max_lines=max_lines)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         info = api.get_func_info(ea)
@@ -37,8 +38,6 @@ def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
         non_function_ref_count = 0
         for c in api.get_func_callers(start_ea):
             key = c["from_func_ea"]
-            # 不属于任何函数的引用点（数据表/RUNTIME_FUNCTION 等）单独计数，
-            # 不混入 callers，避免输出 0xffffffffffffffff 之类无意义地址误导 LLM。
             if key == BADADDR:
                 non_function_ref_count += 1
                 continue
@@ -46,8 +45,8 @@ def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
                 caller_map[key]["call_count"] += 1
             else:
                 caller_map[key] = {"name": c["from_func_name"],
-                                   "ea": ea_to_hex(c["from_func_ea"]),
-                                   "call_count": 1}
+                                    "ea": ea_to_hex(c["from_func_ea"]),
+                                    "call_count": 1}
         callers = list(caller_map.values())
 
         seen_str = {}
@@ -86,10 +85,14 @@ def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str
 
 
 @mcp.tool()
-def decompile(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
+def decompile(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
+              f: str = None) -> str:
     """Get only the decompiled pseudocode of a function. Lighter than
     analyze_function — use when you already have call/xref context and just need
     the code. Falls back to disassembly if decompilation fails."""
+    r = _route_if_remote(f, "decompile",
+                         identifier=identifier, max_lines=max_lines)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         try:
@@ -106,11 +109,15 @@ def decompile(identifier: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
 
 @mcp.tool()
 def decompile_with_addresses(identifier: str,
-                             max_lines: int = DEFAULT_MAX_LINES) -> str:
+                             max_lines: int = DEFAULT_MAX_LINES,
+                             f: str = None) -> str:
     """Decompile a function and annotate each pseudocode line with its
     corresponding address. Use when you need to correlate pseudocode lines to
     machine addresses (e.g. to set a breakpoint or map a bug to an instruction).
     Heavier than plain decompile; use decompile if you don't need addresses."""
+    r = _route_if_remote(f, "decompile_with_addresses",
+                         identifier=identifier, max_lines=max_lines)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.decompile_with_addresses(ea, max_lines)
@@ -122,14 +129,13 @@ def decompile_with_addresses(identifier: str,
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# 注释扩展工具（批次 C）
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_stack_frame(identifier: str) -> str:
+def get_stack_frame(identifier: str, f: str = None) -> str:
     """Get a function's stack frame layout: each stack variable's name, offset,
     size, and type. identifier accepts a function name, hex address, or integer.
     Use to understand local buffer layout (e.g. for overflow analysis)."""
+    r = _route_if_remote(f, "get_stack_frame", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         members = api.get_stack_frame(ea)
@@ -138,14 +144,13 @@ def get_stack_frame(identifier: str) -> str:
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# patch / 数据定义扩展工具（批次 E）
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_switch(identifier: str) -> str:
+def get_switch(identifier: str, f: str = None) -> str:
     """Get switch/jump-table information for an indirect jump instruction:
     the number of cases and each case's values and target address. identifier
     accepts a hex address or integer pointing at the indirect jump."""
+    r = _route_if_remote(f, "get_switch", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.get_switch_info(ea)
@@ -155,3 +160,12 @@ def get_switch(identifier: str) -> str:
         return format_output(result)
     except IDAError as e:
         return error_result(e)
+
+
+_ALL_TOOLS.update({
+    "analyze_function": analyze_function,
+    "decompile": decompile,
+    "decompile_with_addresses": decompile_with_addresses,
+    "get_stack_frame": get_stack_frame,
+    "get_switch": get_switch,
+})

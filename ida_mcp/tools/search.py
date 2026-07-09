@@ -1,19 +1,19 @@
 """MCP 工具（search 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def search(query: str, type: str = "all", limit: int = DEFAULT_SEARCH_LIMIT) -> str:
+def search(query: str, type: str = "all", limit: int = DEFAULT_SEARCH_LIMIT,
+           f: str = None) -> str:
     """Search the IDA database for functions, strings, imports, or immediate
     values. Returns results with context (containing function, nearby code) so
     you can assess relevance without extra calls. Categories (crypto, network,
     etc.) are deterministic labels based on known API name tables, not heuristic
     guesses. type is one of: string, function, import, immediate, all."""
+    r = _route_if_remote(f, "search", query=query, type=type, limit=limit)
+    if r: return r
     try:
         valid_types = {"string", "function", "import", "immediate", "all"}
         if type not in valid_types:
@@ -97,7 +97,6 @@ def search(query: str, type: str = "all", limit: int = DEFAULT_SEARCH_LIMIT) -> 
                     refs = api.get_xrefs_to(ea)
                 except IDAError:
                     refs = []
-                # 按引用者名称去重（同一函数多处引用只保留一条），最多 3 个
                 ref_names = []
                 seen_refs = set()
                 for ref in refs:
@@ -123,10 +122,12 @@ def search(query: str, type: str = "all", limit: int = DEFAULT_SEARCH_LIMIT) -> 
 
 
 @mcp.tool()
-def trace_data(identifier: str) -> str:
+def trace_data(identifier: str, f: str = None) -> str:
     """Trace all cross-references to a given address or symbol. Returns each
     reference with its containing function and a code context snippet, so you can
     understand HOW and WHERE the target is used without separate calls."""
+    r = _route_if_remote(f, "trace_data", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         xrefs = api.get_xrefs_to(ea)
@@ -181,11 +182,13 @@ def trace_data(identifier: str) -> str:
 
 
 @mcp.tool()
-def cross_references(identifier: str) -> str:
+def cross_references(identifier: str, f: str = None) -> str:
     """Get incoming and outgoing cross-references for a function or address.
     Lighter than trace_data — returns reference lists without code context
     snippets. Use when you need the reference graph structure, not the code at
     each site."""
+    r = _route_if_remote(f, "cross_references", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         try:
@@ -224,3 +227,10 @@ def cross_references(identifier: str) -> str:
                               "from": from_list, "to": to_list})
     except IDAError as e:
         return error_result(e)
+
+
+_ALL_TOOLS.update({
+    "search": search,
+    "trace_data": trace_data,
+    "cross_references": cross_references,
+})

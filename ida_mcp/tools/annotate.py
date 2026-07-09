@@ -1,17 +1,16 @@
 """MCP 工具（annotate 域）。
-
-从单文件 server.py 拆分。共享项（mcp 实例、resolve_identifier、format_output、
-错误翻译、辅助函数、常量）在 .._base。导入本模块即触发 @mcp.tool 注册。
 """
 
 from .._base import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def rename(identifier: str, new_name: str) -> str:
+def rename(identifier: str, new_name: str, f: str = None) -> str:
     """Rename a function, global variable, or address. Returns the old and new
     names on success. On name conflict, suggests an alternative name — no need to
     guess."""
+    r = _route_if_remote(f, "rename", identifier=identifier, new_name=new_name)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         try:
@@ -32,11 +31,14 @@ def rename(identifier: str, new_name: str) -> str:
 
 @mcp.tool()
 def get_comment(identifier: str, position: str = "line",
-                repeatable: bool = False) -> str:
+                repeatable: bool = False, f: str = None) -> str:
     """Read a comment. position: 'line' (regular comment at an address, shown in
     both disassembly and pseudocode), 'function' (whole-function comment),
     'anterior' (lines above), or 'posterior' (lines below). identifier accepts a
     name, hex address, or integer."""
+    r = _route_if_remote(f, "get_comment", identifier=identifier,
+                         position=position, repeatable=repeatable)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         if position == "function":
@@ -51,7 +53,6 @@ def get_comment(identifier: str, position: str = "line",
             result = api.get_extra_comment(ea, anterior=False)
             result["ea"] = ea_to_hex(result["ea"])
             return format_output(result)
-        # default: line comment
         result = api.get_comment(ea, repeatable)
         return format_output({"ea": ea_to_hex(ea), "comment": result["comment"]})
     except IDAError as e:
@@ -60,11 +61,15 @@ def get_comment(identifier: str, position: str = "line",
 
 @mcp.tool()
 def set_comment(identifier: str, comment: str, position: str = "line",
-                repeatable: bool = False) -> str:
+                repeatable: bool = False, f: str = None) -> str:
     """Set a comment. position: 'line' (regular comment at an address, appears in
     disassembly and pseudocode), 'function' (whole-function comment), 'anterior'
     (lines above the address), or 'posterior' (lines below). Empty comment
     deletes. identifier accepts a name, hex address, or integer."""
+    r = _route_if_remote(f, "set_comment", identifier=identifier,
+                         comment=comment, position=position,
+                         repeatable=repeatable)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         if position == "function":
@@ -78,14 +83,14 @@ def set_comment(identifier: str, comment: str, position: str = "line",
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# 元信息 / 反汇增强工具（批次 D）
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def patch_bytes(identifier: str, hex_bytes: str) -> str:
+def patch_bytes(identifier: str, hex_bytes: str, f: str = None) -> str:
     """Patch bytes in the IDA database (does NOT modify the original binary file).
     Returns old and new bytes for verification. Use with caution — patches are
     persistent in the IDB."""
+    r = _route_if_remote(f, "patch_bytes", identifier=identifier,
+                         hex_bytes=hex_bytes)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         cleaned = hex_bytes.replace(" ", "")
@@ -107,10 +112,12 @@ def patch_bytes(identifier: str, hex_bytes: str) -> str:
 
 
 @mcp.tool()
-def undefine(identifier: str) -> str:
+def undefine(identifier: str, f: str = None) -> str:
     """Convert the instruction or data at an address back to undefined bytes.
     identifier accepts a name, hex address, or integer. Use before redefining a
     region (e.g. make_code / make_data)."""
+    r = _route_if_remote(f, "undefine", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.undefine_item(ea)
@@ -121,10 +128,12 @@ def undefine(identifier: str) -> str:
 
 
 @mcp.tool()
-def make_code(identifier: str) -> str:
+def make_code(identifier: str, f: str = None) -> str:
     """Convert bytes at an address into a disassembled instruction (code).
     identifier accepts a name, hex address, or integer. Returns the instruction
     length. Use when IDA left real code as raw bytes."""
+    r = _route_if_remote(f, "make_code", identifier=identifier)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.make_code(ea)
@@ -135,9 +144,12 @@ def make_code(identifier: str) -> str:
 
 
 @mcp.tool()
-def make_data(identifier: str, data_type: str = "dword") -> str:
+def make_data(identifier: str, data_type: str = "dword", f: str = None) -> str:
     """Convert bytes at an address into a data item. data_type is one of
     byte/word/dword/qword. identifier accepts a name, hex address, or integer."""
+    r = _route_if_remote(f, "make_data", identifier=identifier,
+                         data_type=data_type)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.make_data(ea, data_type)
@@ -148,10 +160,13 @@ def make_data(identifier: str, data_type: str = "dword") -> str:
 
 
 @mcp.tool()
-def make_string(identifier: str, str_type: str = "c") -> str:
+def make_string(identifier: str, str_type: str = "c", f: str = None) -> str:
     """Convert bytes at an address into a string literal. str_type is 'c' (ASCII,
     default) or 'unicode' (UTF-16). identifier accepts a name, hex address, or
     integer. Returns the decoded string value."""
+    r = _route_if_remote(f, "make_string", identifier=identifier,
+                         str_type=str_type)
+    if r: return r
     try:
         ea = resolve_identifier(identifier)
         result = api.make_string(ea, str_type)
@@ -161,8 +176,13 @@ def make_string(identifier: str, str_type: str = "c") -> str:
         return error_result(e)
 
 
-# ---------------------------------------------------------------------------
-# 图与关系工具（批次 F）——纯 Layer 3 组合，基于现有原子做图遍历
-# ---------------------------------------------------------------------------
-CALLGRAPH_MAX_DEPTH = 5
-CALLGRAPH_NODE_LIMIT = 200
+_ALL_TOOLS.update({
+    "rename": rename,
+    "get_comment": get_comment,
+    "set_comment": set_comment,
+    "patch_bytes": patch_bytes,
+    "undefine": undefine,
+    "make_code": make_code,
+    "make_data": make_data,
+    "make_string": make_string,
+})
