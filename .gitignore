@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDA 数据库与产物
+*.idb
+*.i64
+*.til
+*.nam
+*.id0
+*.id1
+*.id2
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
