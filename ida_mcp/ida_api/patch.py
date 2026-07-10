@@ -57,9 +57,20 @@ def make_data(ea, data_type="dword"):
 def make_string(ea, str_type="c"):
     """把指定地址转换为字符串字面量。str_type: c(默认) / unicode。返回 {success, value}。"""
     def do():
-        strtype = ida_nalt.STRTYPE_C
-        if str_type.lower() in ("unicode", "utf16", "wide"):
-            strtype = ida_nalt.STRTYPE_C_16
+        if not isinstance(str_type, str):
+            raise IDAError("INVALID_PARAM", "str_type must be a string")
+        kind = str_type.lower()
+        string_types = {
+            "c": ida_nalt.STRTYPE_C,
+            "unicode": ida_nalt.STRTYPE_C_16,
+            "utf16": ida_nalt.STRTYPE_C_16,
+            "wide": ida_nalt.STRTYPE_C_16,
+        }
+        if kind not in string_types:
+            raise IDAError(
+                "INVALID_PARAM",
+                "str_type must be one of: c, unicode, utf16, wide")
+        strtype = string_types[kind]
         if not ida_bytes.create_strlit(ea, 0, strtype):
             raise IDAError("MAKE_STRING_FAILED",
                            f"failed to create string at {hex(ea)}")

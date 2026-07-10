@@ -5,10 +5,18 @@ import json
 import struct
 
 HEADER_SIZE = 4
+MAX_FRAME_SIZE = 8 * 1024 * 1024
+
+
+class ProtocolError(ValueError):
+    pass
 
 
 def send_msg(sock, obj):
     data = json.dumps(obj, separators=(',', ':')).encode('utf-8')
+    if len(data) > MAX_FRAME_SIZE:
+        raise ProtocolError(
+            f'message size {len(data)} exceeds limit {MAX_FRAME_SIZE}')
     sock.sendall(struct.pack('>I', len(data)) + data)
 
 
@@ -17,6 +25,9 @@ def recv_msg(sock):
     if not hdr:
         return None
     length = struct.unpack('>I', hdr)[0]
+    if length > MAX_FRAME_SIZE:
+        raise ProtocolError(
+            f'frame size {length} exceeds limit {MAX_FRAME_SIZE}')
     if length == 0:
         return {}
     data = _recv_exact(sock, length)
@@ -43,3 +54,4 @@ MSG_PROMOTE = 'P'
 MSG_PROMOTED = 'D'
 MSG_HEARTBEAT = 'H'
 MSG_ACK = 'A'
+MSG_PROBE = 'Q'

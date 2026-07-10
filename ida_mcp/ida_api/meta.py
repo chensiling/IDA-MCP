@@ -21,7 +21,7 @@ def get_binary_info():
             "processor": ida_idp.get_idp_name() or "",
             "bitness": bits,
             "endian": "big" if ida_ida.inf_is_be() else "little",
-            "image_base": ida_ida.inf_get_baseaddr(),
+            "image_base": ida_nalt.get_imagebase(),
             "min_ea": ida_ida.inf_get_min_ea(),
             "max_ea": ida_ida.inf_get_max_ea(),
             "entry_ea": ida_ida.inf_get_start_ea(),

@@ -4,7 +4,7 @@
 服务器，通过 HTTP 将 IDA Pro 的静态逆向能力暴露给兼容 MCP 的 AI 客户端。
 
 支持**多 IDA 实例**同时工作——独立 Server 进程统一管理，所有 IDA 平等连接为 Worker。
-首个 IDA 自动拉起 Server，最后一个断连后 Server 自动退出。
+首个 IDA 自动拉起 Server；最后一个 Worker 断连并连续空闲 3 秒后发起退出。
 
 ---
 
@@ -19,7 +19,12 @@
   彻底消除 64 位整数精度丢失，也免去模型做任何进制换算。
 - **意图工具。** 在"一次调用对应一个 IDA 动作"的能力工具之外，更高层的意图工具能
   在单次调用中聚合完成一个推理任务所需的全部信息。
-- **自动启停。** Server 在首个 IDA 连接时自动启动，在最后一个 IDA 断连 30 秒后自动退出。
+- **自动启停。** Server 在首个 IDA 连接时自动启动；最后一个 Worker 断连并
+  连续空闲 3 秒后发起退出，期间有 Worker 重连会取消退出。
+- **断服自愈。** Worker 连续连接失败会重新确保 Server 存在；IDA 暂无输入文件时
+  插件持续等待，之后打开文件仍能注册。
+- **36 个工具。** 32 个能力工具 + 4 个意图工具，覆盖概览、反编译、搜索、xref、
+  类型、局部变量、注释、patch、图关系和聚合分析。
 
 ---
 
@@ -40,8 +45,12 @@
 ```
 
 独立 Server 进程（`ida_mcp_standalone.py`）由首个 IDA 的 `ida_mcp.py` 插件通过
-`subprocess.Popen` 启动，使用 IDA 内嵌的 Python。所有 IDA 实例平等——全部作为
-Worker 通过 TCP 连接。
+`subprocess.Popen` 启动，使用 IDAPython 所属的 Python 安装环境。所有 IDA 实例
+平等——全部作为 Worker 通过 TCP 连接。
+
+Server 生命周期为 `STARTING -> ACTIVE -> DRAINING -> STOPPING`。Registry 使用
+Condition + generation；DRAINING 期间的新注册会取消旧 deadline，STOPPING 后
+probe/register 返回不可用。3 秒表示发起优雅退出，不是在途请求的强制终止上限。
 
 进程内的两个职责层：
 
@@ -62,10 +71,11 @@ ida_mcp/                  实现包
 ├── server.py            程序入口：导入工具、execute_tool 调度。
 ├── _base.py             共享基础：mcp 实例、常量、错误翻译、地址/数字转换、路由辅助。
 ├── categories.py        确定性的导入分类表。
-├── standalone.py        独立 MCP Server（HTTP + TCP + 空闲监控）。
+├── launcher.py          定位 IDAPython 所属 Python，拒绝 ida.exe/PATH 回退。
+├── standalone.py        独立 MCP Server（HTTP + TCP + 事件驱动生命周期）。
 ├── multi.py             Worker 与 InternalServer（TCP 注册/转发）。
 ├── router.py            工具调用路由（根据 file_id 分发到远程 Worker）。
-├── registry.py          FileEntry + Registry（线程安全的文件注册表）。
+├── registry.py          FileEntry + Registry（generation、Condition、原子关闭门）。
 ├── protocol.py          TCP 消息编解码（4 字节长度前缀 + JSON）。
 ├── ida_api/             原子层（Layer 2），按功能域拆分
 │   ├── __init__.py      汇出全部原子。
@@ -100,10 +110,14 @@ ida_mcp/                  实现包
 
 - IDA Pro 9.0 或更新版本。
 - Hex-Rays 反编译器。
-- 在 **IDA 内嵌的解释器**中安装 **MCP Python SDK**：
+- 在 **IDAPython 所属 Python 环境**中安装 **MCP Python SDK**：
   ```
-  <ida-内嵌-python> -m pip install mcp
+  <idapython-python.exe> -m pip install mcp
   ```
+
+插件会从 IDAPython 的 `sys.base_prefix`/`sys.prefix` 查找真正的 Python
+解释器，不会使用可能指向 `ida.exe` 的 `sys.executable`。自动发现失败时可设置
+`IDA_MCP_PYTHON` 为对应 `python.exe` 的完整路径。
 
 ---
 
@@ -128,26 +142,30 @@ ida_mcp/                  实现包
 
    ```
    [ida-mcp] No server found, launching...
-   [ida-mcp-server] Listening on http://127.0.0.1:8765/mcp
-   [ida-mcp] Worker | ntoskrnl.exe (5bb8fc99)
+   [ida-mcp-server] Listening on http://127.0.0.1:8765/mcp (36 tools)
+   [ida-mcp] Worker | ntoskrnl.exe (5bb8fc99a3417d2e)
    ```
 
 4. 启动第二个 IDA，打开另一个二进制。插件检测到 Server 已在运行，直接作为 Worker 连入：
 
    ```
-   [ida-mcp] Worker | ACE-BASE.sys (c09a60a0)
+   [ida-mcp] Worker | ACE-BASE.sys (c09a60a08b91306f)
    ```
 
-5. 关闭所有 IDA 后，Server 在 30 秒内检测到无连接，自动退出。
+5. 关闭所有 IDA 后，Server 在连续 3 秒没有 Worker 时发起退出；若仍有正在
+   执行的 MCP 请求，则会先进行优雅关闭。
+
+IDA 启动但尚未打开输入文件时，Worker 会持续等待。若等待期间 Server 因启动保护
+到期而退出，文件出现后 Worker 会重新确保 Server 可用。
 
 ### 多实例使用
 
 所有工具均支持 `f` 参数指定目标文件。先调用 `list_files` 获取可用文件 ID：
 
 ```
-list_files → [{fid: "5bb8fc99", name: "ntoskrnl.exe"}, {fid: "c09a60a0", name: "ACE-BASE.sys"}]
-decompile(f="5bb8fc99", identifier="NtCreateFile")  → ntoskrnl.exe
-decompile(f="c09a60a0", identifier="DriverEntry")     → ACE-BASE.sys
+list_files → [{fid: "5bb8fc99a3417d2e", name: "ntoskrnl.exe"}, {fid: "c09a60a08b91306f", name: "ACE-BASE.sys"}]
+decompile(f="5bb8fc99a3417d2e", identifier="NtCreateFile")  → ntoskrnl.exe
+decompile(f="c09a60a08b91306f", identifier="DriverEntry")  → ACE-BASE.sys
 ```
 
 单实例时可省略 `f` 参数。
@@ -251,5 +269,9 @@ decompile(f="c09a60a0", identifier="DriverEntry")     → ACE-BASE.sys
 
 - Server 绑定本机 HTTP 端口。请确保 :8765 和 :8766 空闲。
 - 通过写操作工具所做的数据库修改保存在 IDA 数据库（`.idb`/`.i64`）中，而非原始二进制文件。
-- Server 在最后一个 Worker 断连 30 秒后自动退出；再次打开 IDA 时自动重新启动。
+- Server 在最后一个 Worker 断连并连续空闲 3 秒后发起退出；期间的新注册会
+  取消退出，再次打开 IDA 时也会自动确保 Server 可用。
+- 如果出现 `Load file ... ida_mcp_standalone.py as`，说明仍在运行旧启动逻辑，
+  把 `ida.exe` 误当作 Python。确认已完整部署 `launcher.py` 并重启全部 IDA；必要时
+  设置 `IDA_MCP_PYTHON` 指向 IDAPython 所属 `python.exe`。
 - 修改 `ida_mcp/` 下任何文件后，需重新部署并重启 IDA，新代码才会生效。

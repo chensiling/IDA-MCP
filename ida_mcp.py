@@ -3,7 +3,7 @@
 在 IDA 内嵌 Python 中启动 Worker，注册到独立的 MCP Server。
 - 第一个 IDA 实例启动时，自动拉起独立 MCP Server 进程。
 - 所有 IDA 实例平等——全部作为 Worker 连接。
-- MCP Server 在最后一个 Worker 断连 30s 后自动退出。
+- MCP Server 在最后一个 Worker 断连并连续空闲 3s 后发起退出。
 
 部署：把 ida_mcp.py / ida_mcp_standalone.py / ida_mcp/ 一起复制到 plugins 目录。
 """
@@ -18,7 +18,6 @@ import time
 import idaapi
 import ida_ida
 import ida_nalt
-import ida_kernwin
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
@@ -26,14 +25,26 @@ if _PLUGIN_DIR not in sys.path:
 
 MCP_HTTP_PORT = 8765
 MCP_INTERNAL_PORT = 8766
+SERVER_LAUNCH_COOLDOWN = 3.0
+
+_server_launch_lock = threading.Lock()
+_last_server_launch = 0.0
 
 
 def _server_running():
+    from ida_mcp import protocol
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.settimeout(0.5)
         s.connect(('127.0.0.1', MCP_INTERNAL_PORT))
-        return True
+        protocol.send_msg(s, {'t': protocol.MSG_PROBE})
+        response = protocol.recv_msg(s)
+        return bool(
+            isinstance(response, dict)
+            and response.get('t') == protocol.MSG_ACK
+            and response.get('ok') is True
+            and response.get('service') == 'ida-mcp')
     except (ConnectionRefusedError, OSError, TimeoutError):
         return False
     finally:
@@ -44,13 +55,18 @@ def _server_running():
 
 
 def _launch_server():
+    from ida_mcp.launcher import find_python_executable
+
     script = os.path.join(_PLUGIN_DIR, 'ida_mcp_standalone.py')
     try:
+        python_executable = find_python_executable()
         subprocess.Popen(
-            [sys.executable, script],
+            [python_executable, script],
+            cwd=_PLUGIN_DIR,
             creationflags=subprocess.CREATE_NO_WINDOW
             if sys.platform == 'win32' else 0,
         )
+        print(f"[ida-mcp] Launching server with {python_executable}")
     except Exception as e:
         print(f"[ida-mcp] Failed to launch server: {e}")
         return False
@@ -64,6 +80,23 @@ def _wait_for_server(timeout=30):
             return True
         time.sleep(0.5)
     return False
+
+
+def _ensure_server_available():
+    """Relaunch a missing Server, rate-limited within this IDA process."""
+    global _last_server_launch
+
+    if _server_running():
+        return True
+    with _server_launch_lock:
+        if _server_running():
+            return True
+        now = time.monotonic()
+        if now - _last_server_launch < SERVER_LAUNCH_COOLDOWN:
+            return False
+        _last_server_launch = now
+        print("[ida-mcp] Server unavailable, relaunching...")
+        return _launch_server()
 
 
 def _collect_file_info():
@@ -88,7 +121,9 @@ def _collect_on_main():
         except Exception as e:
             box['error'] = e
         return 1
-    idaapi.execute_sync(_do, idaapi.MFF_READ)
+    status = idaapi.execute_sync(_do, idaapi.MFF_READ)
+    if status == -1 or ("value" not in box and "error" not in box):
+        raise RuntimeError("failed to collect file information on IDA main thread")
     if 'error' in box:
         raise box['error']
     return box.get('value')
@@ -96,70 +131,78 @@ def _collect_on_main():
 
 class _WorkerThread(threading.Thread):
 
-    def __init__(self, dialog_suppressor):
+    def __init__(self):
         super().__init__(daemon=True)
-        self._dialog_suppressor = dialog_suppressor
+        self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
         self._worker = None
 
     def run(self):
+        worker = None
         try:
             file_info = None
-            for _ in range(30):
+            while file_info is None:
+                if self._stop_event.is_set():
+                    return
                 file_info = _collect_on_main()
-                if file_info is not None:
-                    break
-                time.sleep(1)
-            if file_info is None:
-                print("[ida-mcp] Timed out waiting for file to load")
-                return
+                if file_info is None and self._stop_event.wait(1.0):
+                    return
 
             from ida_mcp.server import execute_tool
             from ida_mcp.multi import Worker
 
-            self._worker = Worker(file_info, execute_tool)
-            self._worker.start()
+            worker = Worker(
+                file_info,
+                execute_tool,
+                ensure_server=_ensure_server_available,
+            )
+            with self._state_lock:
+                if self._stop_event.is_set():
+                    return
+                self._worker = worker
+                worker.start()
             print(f"[ida-mcp] Worker | {file_info['name']} "
                   f"({file_info['fid']})")
 
-            while self._worker._running:
-                time.sleep(1)
+            self._stop_event.wait()
         except Exception as e:
             import traceback
             print(f"[ida-mcp] Worker error: {e}")
             traceback.print_exc()
+        finally:
+            cleanup = None
+            with self._state_lock:
+                if self._worker is worker:
+                    cleanup = self._worker
+                    self._worker = None
+            if cleanup is not None:
+                try:
+                    cleanup.stop()
+                except Exception:
+                    pass
 
     def stop(self):
-        if self._worker:
+        self._stop_event.set()
+        with self._state_lock:
+            worker = self._worker
+            self._worker = None
+        if worker is not None:
             try:
-                self._worker.stop()
+                worker.stop()
             except Exception:
                 pass
-            self._worker = None
-
-
-class _SuppressDialogs(ida_kernwin.UI_Hooks):
-    def ask_yn(self, deflt, fmt):
-        return 1
-    def ask_buttons(self, yes_text, no_text, cancel_text, deflt, fmt):
-        return 1
-
-
-_dialog_suppressor = None
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=5.0)
 
 
 class IDAMCPPlugin(idaapi.plugin_t):
     flags = idaapi.PLUGIN_KEEP
     wanted_name = "IDA MCP"
-    comment = "In-process MCP server for AI-assisted reverse engineering"
+    comment = "Worker for the standalone IDA-MCP server"
     wanted_hotkey = ""
     help = ""
 
     def init(self):
-        global _dialog_suppressor
-        if _dialog_suppressor is None:
-            _dialog_suppressor = _SuppressDialogs()
-            _dialog_suppressor.hook()
-
         if not _server_running():
             print("[ida-mcp] No server found, launching...")
             if not _launch_server():
@@ -170,7 +213,7 @@ class IDAMCPPlugin(idaapi.plugin_t):
                 return idaapi.PLUGIN_KEEP
             print("[ida-mcp] Server started")
 
-        self.worker_thread = _WorkerThread(_dialog_suppressor)
+        self.worker_thread = _WorkerThread()
         self.worker_thread.start()
         return idaapi.PLUGIN_KEEP
 
@@ -178,8 +221,10 @@ class IDAMCPPlugin(idaapi.plugin_t):
         pass
 
     def term(self):
-        if getattr(self, "worker_thread", None) is not None:
-            self.worker_thread.stop()
+        worker_thread = getattr(self, "worker_thread", None)
+        self.worker_thread = None
+        if worker_thread is not None:
+            worker_thread.stop()
             print("[ida-mcp] Worker shutdown requested")
 
 

@@ -40,6 +40,11 @@ def get_comment(identifier: str, position: str = "line",
                          position=position, repeatable=repeatable)
     if r: return r
     try:
+        valid_positions = {"line", "function", "anterior", "posterior"}
+        if not isinstance(position, str) or position not in valid_positions:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"position must be one of {sorted(valid_positions)}")
         ea = resolve_identifier(identifier)
         if position == "function":
             result = api.get_func_comment(ea, repeatable)
@@ -71,6 +76,11 @@ def set_comment(identifier: str, comment: str, position: str = "line",
                          repeatable=repeatable)
     if r: return r
     try:
+        valid_positions = {"line", "function", "anterior", "posterior"}
+        if not isinstance(position, str) or position not in valid_positions:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"position must be one of {sorted(valid_positions)}")
         ea = resolve_identifier(identifier)
         if position == "function":
             return format_output(api.set_func_comment(ea, comment, repeatable))

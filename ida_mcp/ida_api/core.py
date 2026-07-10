@@ -25,6 +25,7 @@ import ida_idp
 import ida_loader
 import ida_frame
 import ida_ida
+import ida_ua
 import idautils
 import idc
 
@@ -37,6 +38,30 @@ class IDAError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+_HEX_RAYS_INITIALIZED = False
+
+
+def ensure_hexrays():
+    """Initialize Hex-Rays before using any decompiler API.
+
+    Must be called from the IDA main thread.  Keeping this check in the shared
+    atomic layer gives every decompiler-backed operation the same failure
+    contract when the current IDA edition has no compatible decompiler.
+    """
+    global _HEX_RAYS_INITIALIZED
+    if _HEX_RAYS_INITIALIZED:
+        return
+    try:
+        available = ida_hexrays.init_hexrays_plugin()
+    except Exception as e:  # noqa: BLE001
+        raise IDAError("DECOMPILE_FAILED",
+                       f"failed to initialize Hex-Rays: {e}")
+    if not available:
+        raise IDAError("DECOMPILE_FAILED",
+                       "Hex-Rays decompiler is not available")
+    _HEX_RAYS_INITIALIZED = True
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +83,14 @@ def run_in_main(fn, write=False) -> Any:
         return 1
 
     flags = idaapi.MFF_WRITE if write else idaapi.MFF_READ
-    idaapi.execute_sync(wrapper, flags)
+    status = idaapi.execute_sync(wrapper, flags)
+    if status == -1:
+        raise IDAError("INTERNAL", "failed to execute IDA API call on main thread")
     if "error" in box:
         raise box["error"]
-    return box.get("value")
+    if "value" not in box:
+        raise IDAError("INTERNAL", "IDA API call did not execute")
+    return box["value"]
 
 
 # ---------------------------------------------------------------------------

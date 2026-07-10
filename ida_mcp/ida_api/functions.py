@@ -13,10 +13,14 @@ def decompile(ea):
         func = ida_funcs.get_func(ea)
         if not func:
             raise IDAError("NO_FUNCTION", f"no function at {hex(ea)}")
+        ensure_hexrays()
         try:
             cfunc = ida_hexrays.decompile(func.start_ea)
         except ida_hexrays.DecompilationFailure as e:
             raise IDAError("DECOMPILE_FAILED", str(e))
+        if cfunc is None:
+            raise IDAError("DECOMPILE_FAILED",
+                           f"decompilation returned None at {hex(func.start_ea)}")
         return str(cfunc)
 
     return run_in_main(do)

@@ -15,6 +15,7 @@ def search(query: str, type: str = "all", limit: int = DEFAULT_SEARCH_LIMIT,
     r = _route_if_remote(f, "search", query=query, type=type, limit=limit)
     if r: return r
     try:
+        limit = _validate_positive_int(limit, "limit", 500)
         valid_types = {"string", "function", "import", "immediate", "all"}
         if type not in valid_types:
             return format_output({"error": {
@@ -196,8 +197,11 @@ def cross_references(identifier: str, f: str = None) -> str:
         except IDAError:
             name = ""
 
+        from_xrefs = api.get_xrefs_to(ea)
+        from_total = len(from_xrefs)
+        from_truncated = from_total > DEFAULT_XREF_LIGHT_LIMIT
         from_list = []
-        for xref in api.get_xrefs_to(ea)[:DEFAULT_XREF_LIGHT_LIMIT]:
+        for xref in from_xrefs[:DEFAULT_XREF_LIGHT_LIMIT]:
             from_ea = xref["from_ea"]
             cf = _containing_function(from_ea)
             try:
@@ -208,8 +212,11 @@ def cross_references(identifier: str, f: str = None) -> str:
             from_list.append({"function": cf["name"] if cf else None,
                               "ea": ea_to_hex(from_ea), "instruction": instruction})
 
+        to_xrefs = api.get_xrefs_from(ea)
+        to_total = len(to_xrefs)
+        to_truncated = to_total > DEFAULT_XREF_LIGHT_LIMIT
         to_list = []
-        for xref in api.get_xrefs_from(ea)[:DEFAULT_XREF_LIGHT_LIMIT]:
+        for xref in to_xrefs[:DEFAULT_XREF_LIGHT_LIMIT]:
             to_ea = xref["to_ea"]
             try:
                 nm = api.get_name(to_ea)["name"]
@@ -223,8 +230,15 @@ def cross_references(identifier: str, f: str = None) -> str:
             to_list.append({"function": nm, "ea": ea_to_hex(to_ea),
                             "instruction": instruction})
 
-        return format_output({"target": {"name": name, "ea": ea_to_hex(ea)},
-                              "from": from_list, "to": to_list})
+        return format_output({
+            "target": {"name": name, "ea": ea_to_hex(ea)},
+            "from": from_list,
+            "from_total": from_total,
+            "from_truncated": from_truncated,
+            "to": to_list,
+            "to_total": to_total,
+            "to_truncated": to_truncated,
+        })
     except IDAError as e:
         return error_result(e)
 

@@ -15,6 +15,7 @@ def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
                          identifier=identifier, max_lines=max_lines)
     if r: return r
     try:
+        max_lines = _validate_positive_int(max_lines, "max_lines", 2000)
         ea = resolve_identifier(identifier)
         info = api.get_func_info(ea)
         start_ea = info["ea"]
@@ -69,8 +70,7 @@ def analyze_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
             edge_count = sum(len(b["succs"]) for b in blocks)
             features["basic_block_count"] = node_count
             features["cyclomatic_complexity"] = edge_count - node_count + 2
-            features["has_loops"] = any(
-                any(succ <= b["start"] for succ in b["succs"]) for b in blocks)
+            features["has_loops"] = _cfg_has_cycle(blocks)
 
         return format_output({
             "name": info["name"], "ea": ea_to_hex(start_ea), "size": info["size"],
@@ -94,6 +94,7 @@ def decompile(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
                          identifier=identifier, max_lines=max_lines)
     if r: return r
     try:
+        max_lines = _validate_positive_int(max_lines, "max_lines", 2000)
         ea = resolve_identifier(identifier)
         try:
             name = api.get_name(ea)["name"]
@@ -119,6 +120,7 @@ def decompile_with_addresses(identifier: str,
                          identifier=identifier, max_lines=max_lines)
     if r: return r
     try:
+        max_lines = _validate_positive_int(max_lines, "max_lines", 2000)
         ea = resolve_identifier(identifier)
         result = api.decompile_with_addresses(ea, max_lines)
         for ln in result["lines"]:

@@ -13,6 +13,19 @@ from ._base import (  # noqa: F401
 from . import tools  # noqa: F401  # 导入即注册全部工具
 
 
+def require_registered_tools():
+    """Fail fast when an entry point forgot to import the tool modules."""
+    count = len(_ALL_TOOLS)
+    if count == 0:
+        raise RuntimeError(
+            "IDA-MCP started without any registered tools; "
+            "ida_mcp.tools was not loaded correctly")
+    return count
+
+
+REGISTERED_TOOL_COUNT = require_registered_tools()
+
+
 def execute_tool(name, kwargs):
     func = _ALL_TOOLS.get(name)
     if func is None:

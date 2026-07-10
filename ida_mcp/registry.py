@@ -22,30 +22,113 @@ class FileEntry:
 class Registry:
     def __init__(self):
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
         self._files = {}
         self._conns = {}
+        self._generation = 0
+        self._accepting = True
 
     def register(self, entry):
         with self._lock:
+            if not self._accepting:
+                return False
+            previous = self._files.get(entry.fid)
+            if previous is not None and previous.conn is not None:
+                self._untrack(previous.conn, entry.fid)
             self._files[entry.fid] = entry
-            if entry.conn:
-                self._conns.setdefault(id(entry.conn), []).append(entry.fid)
+            if entry.conn is not None:
+                self._track(entry.conn, entry.fid)
+            self._notify_changed()
+            return True
 
-    def unregister(self, fid):
+    def unregister(self, fid, conn=None):
+        """Remove an entry only when it still belongs to ``conn``.
+
+        Passing no connection retains the administrative/unconditional behavior.
+        """
         with self._lock:
-            entry = self._files.pop(fid, None)
-            if entry and entry.conn:
-                cl = self._conns.get(id(entry.conn), [])
-                if fid in cl:
-                    cl.remove(fid)
+            entry = self._files.get(fid)
+            if entry is None or (conn is not None and entry.conn is not conn):
+                return None
+            self._files.pop(fid, None)
+            if entry.conn is not None:
+                self._untrack(entry.conn, fid)
+            self._notify_changed()
             return entry
 
     def unregister_conn(self, conn):
         with self._lock:
-            fids = self._conns.pop(id(conn), [])
+            owner = self._conns.get(id(conn))
+            if owner is None or owner[0] is not conn:
+                return []
+            _, tracked_fids = self._conns.pop(id(conn))
+            removed = []
+            fids = list(tracked_fids)
             for fid in fids:
-                self._files.pop(fid, None)
-            return fids
+                entry = self._files.get(fid)
+                if entry is not None and entry.conn is conn:
+                    self._files.pop(fid, None)
+                    removed.append(fid)
+            if removed:
+                self._notify_changed()
+            return removed
+
+    def snapshot(self):
+        """Return ``(member_count, generation, accepting)`` atomically."""
+        with self._lock:
+            return len(self._files), self._generation, self._accepting
+
+    def wait_for_change(self, generation, timeout=None):
+        """Wait until membership/acceptance changes, then return a snapshot."""
+        with self._changed:
+            self._changed.wait_for(
+                lambda: self._generation != generation,
+                timeout=timeout,
+            )
+            return len(self._files), self._generation, self._accepting
+
+    def begin_shutdown_if_empty(self, generation):
+        """Atomically stop registration if ``generation`` is still empty."""
+        with self._lock:
+            if (not self._accepting or self._generation != generation
+                    or self._files):
+                return False
+            self._accepting = False
+            self._notify_changed()
+            return True
+
+    def stop_accepting(self):
+        with self._lock:
+            if not self._accepting:
+                return False
+            self._accepting = False
+            self._notify_changed()
+            return True
+
+    def is_accepting(self):
+        with self._lock:
+            return self._accepting
+
+    def _notify_changed(self):
+        self._generation += 1
+        self._changed.notify_all()
+
+    def _track(self, conn, fid):
+        key = id(conn)
+        owner = self._conns.get(key)
+        if owner is None or owner[0] is not conn:
+            owner = (conn, set())
+            self._conns[key] = owner
+        owner[1].add(fid)
+
+    def _untrack(self, conn, fid):
+        key = id(conn)
+        owner = self._conns.get(key)
+        if owner is None or owner[0] is not conn:
+            return
+        owner[1].discard(fid)
+        if not owner[1]:
+            self._conns.pop(key, None)
 
     def get(self, fid):
         with self._lock:
@@ -64,7 +147,7 @@ class Registry:
             seen = set()
             conns = []
             for e in self._files.values():
-                if e.conn and id(e.conn) not in seen:
+                if e.conn is not None and id(e.conn) not in seen:
                     seen.add(id(e.conn))
                     conns.append(e.conn)
             return conns

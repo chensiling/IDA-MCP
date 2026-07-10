@@ -28,8 +28,13 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
         truncated = False
 
         def add_node(ea, name):
+            nonlocal truncated
             if ea not in nodes:
+                if len(nodes) >= CALLGRAPH_NODE_LIMIT:
+                    truncated = True
+                    return False
                 nodes[ea] = name or ea_to_hex(ea)
+            return True
 
         try:
             root_name = api.get_name(root)["name"]
@@ -38,30 +43,29 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
         add_node(root, root_name)
 
         def expand(get_neighbors, forward):
-            nonlocal truncated
             frontier = [root]
+            visited = {root}
             for _ in range(depth):
                 nxt = []
                 for cur in frontier:
                     for nb_ea, nb_name in get_neighbors(cur):
-                        add_node(nb_ea, nb_name)
+                        if not add_node(nb_ea, nb_name):
+                            return
                         edge = (cur, nb_ea) if forward else (nb_ea, cur)
                         if edge not in seen_edges:
                             seen_edges.add(edge)
                             edges.append({"from": ea_to_hex(edge[0]),
                                           "to": ea_to_hex(edge[1])})
-                        if nb_ea not in [f for f in frontier]:
+                        if nb_ea not in visited:
+                            visited.add(nb_ea)
                             nxt.append(nb_ea)
-                        if len(nodes) >= CALLGRAPH_NODE_LIMIT:
-                            truncated = True
-                            return
-                frontier = list(dict.fromkeys(nxt))
+                frontier = nxt
                 if not frontier:
                     break
 
         if direction in ("callees", "both"):
             expand(_callees_of, True)
-        if direction in ("callers", "both"):
+        if not truncated and direction in ("callers", "both"):
             expand(_callers_of, False)
 
         return format_output({
@@ -100,6 +104,8 @@ def function_reachability(source: str, target: str, max_depth: int = 6,
         q = deque([(src, 0)])
         found = False
         nodes_scanned = 0
+        node_budget = CALLGRAPH_NODE_LIMIT * 5
+        budget_exhausted = False
         while q:
             cur, d = q.popleft()
             if cur == dst:
@@ -107,21 +113,33 @@ def function_reachability(source: str, target: str, max_depth: int = 6,
                 break
             if d >= max_depth:
                 continue
-            nodes_scanned += 1
-            if nodes_scanned > CALLGRAPH_NODE_LIMIT * 5:
+            if nodes_scanned >= node_budget:
+                budget_exhausted = True
                 break
+            nodes_scanned += 1
             for nb_ea, _nm in _callees_of(cur):
+                if nb_ea == dst:
+                    if nb_ea not in visited:
+                        visited.add(nb_ea)
+                        parent[nb_ea] = cur
+                    found = True
+                    break
                 if nb_ea not in visited:
                     visited.add(nb_ea)
                     parent[nb_ea] = cur
                     q.append((nb_ea, d + 1))
+            if found:
+                break
 
         if not found:
             return format_output({
-                "reachable": False,
+                "reachable": None if budget_exhausted else False,
+                "complete": not budget_exhausted,
+                "truncated": budget_exhausted,
                 "source": ea_to_hex(src),
                 "target": ea_to_hex(dst),
                 "searched_depth": max_depth,
+                "nodes_scanned": nodes_scanned,
             })
         path = [dst]
         while path[-1] != src:
@@ -136,10 +154,13 @@ def function_reachability(source: str, target: str, max_depth: int = 6,
             detailed.append({"ea": ea_to_hex(ea), "name": nm})
         return format_output({
             "reachable": True,
+            "complete": True,
+            "truncated": False,
             "source": ea_to_hex(src),
             "target": ea_to_hex(dst),
             "path_length": len(path),
             "path": detailed,
+            "nodes_scanned": nodes_scanned,
         })
     except IDAError as e:
         return error_result(e)

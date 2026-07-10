@@ -60,6 +60,8 @@ def get_func_callers(ea):
         start = func.start_ea if func else ea
         result = []
         for xref in idautils.XrefsTo(start):
+            if xref.type not in (ida_xref.fl_CN, ida_xref.fl_CF):
+                continue
             from_func = ida_funcs.get_func(xref.frm)
             if from_func:
                 from_func_ea = from_func.start_ea

@@ -41,8 +41,9 @@ def get_imports():
             module = ida_nalt.get_import_module_name(i) or ""
 
             def cb(ea, name, ordinal, _module=module):
-                if name:
-                    result.append({"name": name, "ea": ea, "module": _module})
+                import_name = str(name) if name else f"ordinal_{ordinal}"
+                result.append({"name": import_name, "ea": ea,
+                               "module": _module, "ordinal": ordinal})
                 return True
 
             ida_nalt.enum_import_names(i, cb)

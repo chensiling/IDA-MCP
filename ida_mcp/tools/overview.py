@@ -123,7 +123,11 @@ def list_files() -> str:
         })
     try:
         entries = router.registry.list_all()
-        files = [[e.fid, e.name, e.arch, e.bits, e.path] for e in entries]
+        files = [
+            {"fid": e.fid, "name": e.name, "arch": e.arch,
+             "bits": e.bits, "path": e.path}
+            for e in entries
+        ]
         return format_output({
             "count": len(files),
             "files": files,

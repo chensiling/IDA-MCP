@@ -4,7 +4,9 @@ FastMCP + streamable-http，跑在 IDA 内嵌 Python 里。工具直接调用 id
 （不再经 TCP/ida_client）。语义组装规则与原 ida_mcp_server.py 一致。
 """
 
+import hashlib
 import json
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -45,6 +47,7 @@ __all__ = [
     "format_output", "_to_hex", "_to_dec", "_normalize_numbers",
     # 共享辅助
     "_truncate_lines", "_decompile_or_disasm", "_try_parse_int",
+    "_validate_positive_int", "_cfg_has_cycle",
     "_containing_function", "_suggest_name", "_func_start",
     "_callees_of", "_callers_of", "_segment_of",
     # 多实例
@@ -82,14 +85,15 @@ def _get_router():
     return _MULTI_ROUTER
 
 
-def get_file_id(path):
-    import hashlib
-    return hashlib.sha256(path.encode('utf-8')).hexdigest()[:8]
+def get_file_id(path, instance_id=None):
+    """Return an ID for one loaded IDA instance, not just for a file path."""
+    normalized = os.path.normcase(os.path.realpath(path))
+    owner = os.getpid() if instance_id is None else instance_id
+    payload = f"{normalized}\0{owner}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def _route_if_remote(f, tool_name, **kwargs):
-    if f is None:
-        return ""
     router = _get_router()
     if router is None:
         return ""
@@ -119,6 +123,21 @@ ERROR_MESSAGES = {
     "RESOLVE_FAILED": "Could not resolve the identifier. Try using an exact address "
                       "(e.g., '0x401000') or check the function name spelling.",
     "INTERNAL": "An unexpected internal error occurred.",
+    "EXECUTE_SYNC_FAILED": "IDA could not schedule the operation on its main thread.",
+    "HEXRAYS_UNAVAILABLE": "The Hex-Rays decompiler is unavailable or could not be initialized.",
+    "TYPE_NOT_FOUND": "The requested local type does not exist.",
+    "TYPE_PARSE_FAILED": "IDA could not parse the supplied type declaration.",
+    "SET_TYPE_FAILED": "IDA could not apply the supplied type.",
+    "NO_SWITCH": "No switch or jump table exists at the specified address.",
+    "NO_FRAME": "The function has no stack frame information.",
+    "NO_TYPE": "No type information is available for the requested item.",
+    "DELETE_TYPE_FAILED": "IDA could not delete the requested local type.",
+    "RENAME_LVAR_FAILED": "IDA could not rename the requested local variable.",
+    "SET_LVAR_TYPE_FAILED": "IDA could not apply the type to the requested local variable.",
+    "UNDEFINE_FAILED": "IDA could not undefine the item at the specified address.",
+    "MAKE_CODE_FAILED": "IDA could not create an instruction at the specified address.",
+    "MAKE_DATA_FAILED": "IDA could not create the requested data item.",
+    "MAKE_STRING_FAILED": "IDA could not create a string at the specified address.",
 }
 
 
@@ -169,7 +188,7 @@ def resolve_identifier(identifier):
         if s.isdigit():
             return int(s)
         try:
-            return api.get_func_by_name(s)["ea"]
+            return api.get_ea_by_name(s)["ea"]
         except IDAError as e:
             if e.code == "NAME_NOT_FOUND":
                 raise IDAError("RESOLVE_FAILED", f"could not resolve '{identifier}'")
@@ -274,6 +293,37 @@ def _try_parse_int(text):
         return None
 
 
+def _validate_positive_int(value, name, maximum):
+    """Validate a bounded MCP control parameter and return it unchanged."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise IDAError("INVALID_PARAM", f"{name} must be an integer")
+    if value < 1 or value > maximum:
+        raise IDAError(
+            "INVALID_PARAM", f"{name} must be between 1 and {maximum}")
+    return value
+
+
+def _cfg_has_cycle(blocks):
+    """Detect a directed cycle in a basic-block graph using DFS colors."""
+    graph = {block["start"]: tuple(block.get("succs", ())) for block in blocks}
+    colors = {}
+
+    def visit(node):
+        color = colors.get(node, 0)
+        if color == 1:
+            return True
+        if color == 2:
+            return False
+        colors[node] = 1
+        for successor in graph.get(node, ()):
+            if successor in graph and visit(successor):
+                return True
+        colors[node] = 2
+        return False
+
+    return any(visit(node) for node in graph if colors.get(node, 0) == 0)
+
+
 
 def _containing_function(ea):
     try:
@@ -291,7 +341,7 @@ def _suggest_name(base):
     for i in range(100):
         candidate = f"{base}_{i}"
         try:
-            api.get_func_by_name(candidate)
+            api.get_ea_by_name(candidate)
         except IDAError as e:
             if e.code == "NAME_NOT_FOUND":
                 return candidate

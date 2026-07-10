@@ -12,6 +12,7 @@ def list_types(name_filter: str = "", limit: int = 100, f: str = None) -> str:
     r = _route_if_remote(f, "list_types", name_filter=name_filter, limit=limit)
     if r: return r
     try:
+        limit = _validate_positive_int(limit, "limit", 500)
         types = api.list_local_types(name_filter or None)
         total = len(types)
         truncated = total > limit

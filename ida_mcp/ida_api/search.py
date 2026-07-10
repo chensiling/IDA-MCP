@@ -11,17 +11,26 @@ from .core import *  # noqa: F401,F403
 def search_text(pattern):
     def do():
         result = []
+        min_ea = idaapi.inf_get_min_ea()
+        flags = ida_search.SEARCH_DOWN | ida_search.SEARCH_CASE
+
+        # find_text skips its starting EA.  Address zero has no representable
+        # predecessor, so inspect that one line explicitly before searching.
+        if min_ea == 0 and ida_bytes.is_loaded(min_ea):
+            line = ida_lines.tag_remove(
+                idc.generate_disasm_line(min_ea, 0) or "")
+            if pattern in line:
+                result.append({"ea": min_ea, "line": line})
+        start_ea = min_ea - 1 if min_ea > 0 else min_ea
         ea = ida_search.find_text(
-            idaapi.inf_get_min_ea(), 0, 0, pattern,
-            ida_search.SEARCH_DOWN | ida_search.SEARCH_CASE)
+            start_ea, 0, 0, pattern, flags)
         while ea != idaapi.BADADDR:
             line = ida_lines.tag_remove(idc.generate_disasm_line(ea, 0) or "")
             result.append({"ea": ea, "line": line})
             if len(result) >= SEARCH_HARD_LIMIT:
                 break
             nxt = ida_search.find_text(
-                ea + 1, 0, 0, pattern,
-                ida_search.SEARCH_DOWN | ida_search.SEARCH_CASE)
+                ea, 0, 0, pattern, flags)
             if nxt <= ea:
                 break
             ea = nxt
@@ -66,8 +75,24 @@ def search_bytes(hex_pattern):
 def search_imm(value):
     def do():
         result = []
-        ea = idaapi.inf_get_min_ea()
+        min_ea = idaapi.inf_get_min_ea()
         end = idaapi.inf_get_max_ea()
+
+        # find_imm also skips the starting EA.  Handle EA 0 explicitly because
+        # subtracting one would wrap to BADADDR.
+        if min_ea == 0 and ida_bytes.is_loaded(min_ea):
+            insn = idautils.DecodeInstruction(min_ea)
+            if insn is not None:
+                for op in insn.ops:
+                    if op.type == ida_ua.o_void:
+                        break
+                    if op.type == ida_ua.o_imm and op.value == value:
+                        result.append({
+                            "ea": min_ea,
+                            "func_name": ida_funcs.get_func_name(min_ea) or "",
+                        })
+                        break
+        ea = min_ea - 1 if min_ea > 0 else min_ea
         while ea < end and ea != idaapi.BADADDR:
             # find_imm 运行时返回 (ea, opnum) 元组；stub 误标为 int，故忽略类型检查
             found, _op = ida_search.find_imm(ea, ida_search.SEARCH_DOWN, value)  # type: ignore
@@ -77,7 +102,7 @@ def search_imm(value):
                            "func_name": ida_funcs.get_func_name(found) or ""})
             if len(result) >= SEARCH_HARD_LIMIT:
                 break
-            ea = found + 1
+            ea = found
         return result
 
     return run_in_main(do)

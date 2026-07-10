@@ -1,10 +1,11 @@
-"""IDA-MCP 插件包：在 IDA 内嵌 Python 中运行的单进程 MCP Server。
+"""IDA-MCP 插件包：独立 MCP Server + 多 IDA Worker。
 
-架构（单进程）：
-    opencode  ──HTTP──▶  ida_mcp.py (IDA 插件)
-                          └─ FastMCP(streamable-http) 后台线程
-                             └─ 工具经 execute_sync 直调 IDA API
+架构：
+    MCP client ──HTTP──▶ ida_mcp_standalone.py
+                              └─ TCP registry/router
+                                  ├─ IDA Worker #1
+                                  └─ IDA Worker #2
 
-不再需要 TCP bridge / ida_client / 外部 Python。所有原子操作在 ida_api.py，
-工具组装在 server.py。
+Server 由首个 IDA 使用 IDA 的 Python 解释器拉起。工具组合在 tools/，
+原子操作在 ida_api/，Worker 通过 execute_sync 在 IDA 主线程执行原子。
 """

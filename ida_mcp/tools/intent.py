@@ -17,6 +17,7 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
                          identifier=identifier, max_lines=max_lines)
     if r: return r
     try:
+        max_lines = _validate_positive_int(max_lines, "max_lines", 2000)
         ea = resolve_identifier(identifier)
         info = api.get_func_info(ea)
         start_ea = info["ea"]
@@ -31,8 +32,11 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
                 raise
 
         import_names = {imp["name"] for imp in api.get_imports()}
+        all_callees = api.get_func_callees(start_ea)
+        callees_total = len(all_callees)
+        callees_truncated = callees_total > INTENT_CALLEE_LIMIT
         callees = []
-        for c in api.get_func_callees(start_ea)[:INTENT_CALLEE_LIMIT]:
+        for c in all_callees[:INTENT_CALLEE_LIMIT]:
             nm = c["to_func_name"]
             cat = categorize_import(nm)
             callees.append({
@@ -51,14 +55,21 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
             else:
                 caller_map[key] = {"name": c["from_func_name"],
                                    "ea": ea_to_hex(key), "call_count": 1}
-        callers = list(caller_map.values())[:INTENT_CALLER_LIMIT]
+        all_callers = list(caller_map.values())
+        callers_total = len(all_callers)
+        callers_truncated = callers_total > INTENT_CALLER_LIMIT
+        callers = all_callers[:INTENT_CALLER_LIMIT]
 
         seen_str = {}
         for sr in api.get_func_string_refs(start_ea):
             seen_str.setdefault(sr["string_ea"],
                                 {"value": sr["value"],
                                  "ea": ea_to_hex(sr["string_ea"])})
-        referenced_strings = list(seen_str.values())[:INTENT_STRING_LIMIT]
+        all_referenced_strings = list(seen_str.values())
+        referenced_strings_total = len(all_referenced_strings)
+        referenced_strings_truncated = (
+            referenced_strings_total > INTENT_STRING_LIMIT)
+        referenced_strings = all_referenced_strings[:INTENT_STRING_LIMIT]
 
         FUNC_LIB = 0x00000004
         features = {"is_library": bool(info["flags"] & FUNC_LIB),
@@ -73,8 +84,7 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
             ec = sum(len(b["succs"]) for b in blocks)
             features["basic_block_count"] = nc
             features["cyclomatic_complexity"] = ec - nc + 2
-            features["has_loops"] = any(
-                any(s <= b["start"] for s in b["succs"]) for b in blocks)
+            features["has_loops"] = _cfg_has_cycle(blocks)
 
         categories = sorted({c["category"] for c in callees if c["category"]})
 
@@ -86,8 +96,14 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
             "pseudocode_truncated": truncated,
             "total_lines": total_lines,
             "callees": callees,
+            "callees_total": callees_total,
+            "callees_truncated": callees_truncated,
             "callers": callers,
+            "callers_total": callers_total,
+            "callers_truncated": callers_truncated,
             "referenced_strings": referenced_strings,
+            "referenced_strings_total": referenced_strings_total,
+            "referenced_strings_truncated": referenced_strings_truncated,
             "features": features,
             "callee_categories": categories,
         })
@@ -155,8 +171,7 @@ def explore_data(identifier: str, f: str = None) -> str:
                 bucket = addr_taken
             else:
                 bucket = other
-            if len(bucket) < DATA_XREF_LIMIT:
-                bucket.append(site)
+            bucket.append(site)
 
         def dedup(lst):
             seen, out = set(), []
@@ -166,6 +181,11 @@ def explore_data(identifier: str, f: str = None) -> str:
                     seen.add(key)
                     out.append(s)
             return out
+
+        readers_out = dedup(readers)
+        writers_out = dedup(writers)
+        addr_taken_out = dedup(addr_taken)
+        other_out = dedup(other)
 
         return format_output({
             "ea": ea_to_hex(ea),
@@ -179,11 +199,20 @@ def explore_data(identifier: str, f: str = None) -> str:
                 "read_count": len(readers),
                 "write_count": len(writers),
                 "address_taken_count": len(addr_taken),
+                "other_count": len(other),
             },
-            "read_by": dedup(readers),
-            "written_by": dedup(writers),
-            "address_taken_by": dedup(addr_taken),
-            "other_refs": dedup(other),
+            "read_by": readers_out[:DATA_XREF_LIMIT],
+            "read_by_total": len(readers_out),
+            "read_by_truncated": len(readers_out) > DATA_XREF_LIMIT,
+            "written_by": writers_out[:DATA_XREF_LIMIT],
+            "written_by_total": len(writers_out),
+            "written_by_truncated": len(writers_out) > DATA_XREF_LIMIT,
+            "address_taken_by": addr_taken_out[:DATA_XREF_LIMIT],
+            "address_taken_by_total": len(addr_taken_out),
+            "address_taken_by_truncated": len(addr_taken_out) > DATA_XREF_LIMIT,
+            "other_refs": other_out[:DATA_XREF_LIMIT],
+            "other_refs_total": len(other_out),
+            "other_refs_truncated": len(other_out) > DATA_XREF_LIMIT,
         })
     except IDAError as e:
         return error_result(e)
@@ -249,6 +278,7 @@ def review_string_usage(query: str, limit: int = 15, f: str = None) -> str:
                          query=query, limit=limit)
     if r: return r
     try:
+        limit = _validate_positive_int(limit, "limit", 500)
         q = query.lower()
         matches = []
         for s in api.get_strings():

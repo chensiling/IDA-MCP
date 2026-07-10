@@ -13,6 +13,7 @@ def _decompile_cfunc(ea):
     func = ida_funcs.get_func(ea)
     if not func:
         raise IDAError("NO_FUNCTION", f"no function at {hex(ea)}")
+    ensure_hexrays()
     try:
         cfunc = ida_hexrays.decompile(func.start_ea)
     except ida_hexrays.DecompilationFailure as e:
@@ -50,6 +51,7 @@ def rename_lvar(ea, old_name, new_name):
         func = ida_funcs.get_func(ea)
         if not func:
             raise IDAError("NO_FUNCTION", f"no function at {hex(ea)}")
+        ensure_hexrays()
         if not ida_hexrays.rename_lvar(func.start_ea, old_name, new_name):
             raise IDAError("RENAME_LVAR_FAILED",
                            f"failed to rename lvar '{old_name}' "
@@ -65,14 +67,19 @@ def set_lvar_type(ea, var_name, new_type):
         func = ida_funcs.get_func(ea)
         if not func:
             raise IDAError("NO_FUNCTION", f"no function at {hex(ea)}")
+        ensure_hexrays()
         # 解析目标类型字符串为 tinfo_t
         tif = ida_typeinf.tinfo_t()
         decl = new_type if new_type.strip().endswith(";") else new_type + ";"
         if ida_typeinf.parse_decl(tif, ida_typeinf.get_idati(), decl,
                                   ida_typeinf.PT_SIL) is None:
             raise IDAError("INVALID_PARAM", f"cannot parse type: {new_type}")
+        locator = ida_hexrays.lvar_locator_t()
+        if not ida_hexrays.locate_lvar(locator, func.start_ea, var_name):
+            raise IDAError("SET_LVAR_TYPE_FAILED",
+                           f"local variable not found: '{var_name}'")
         info = ida_hexrays.lvar_saved_info_t()
-        info.name = var_name
+        info.ll = locator
         info.type = tif
         if not ida_hexrays.modify_user_lvar_info(
                 func.start_ea, ida_hexrays.MLI_TYPE, info):
