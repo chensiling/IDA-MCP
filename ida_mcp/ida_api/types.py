@@ -6,20 +6,34 @@ SEARCH_HARD_LIMIT）在 core.py，此处 `from .core import *` 引入。函数�
 """
 
 from .core import *  # noqa: F401,F403
+from .._contracts import bitfield_byte_envelope, read_bitfield_marker
 
 
-def _tif_kind(tif):
-    """判断 tinfo_t 的种类，返回 'struct'/'union'/'enum'/'typedef'/'other'。"""
-    try:
-        if tif.is_udt():
-            return "union" if tif.is_union() else "struct"
-        if tif.is_enum():
-            return "enum"
-        if tif.is_typeref():
-            return "typedef"
-    except Exception:  # noqa: BLE001
-        pass
+def _classify_tif_kind(tif):
+    """Return the exact kind, propagating predicate failures to the caller."""
+    if tif.is_udt():
+        return "union" if tif.is_union() else "struct"
+    if tif.is_enum():
+        return "enum"
+    if tif.is_typeref():
+        return "typedef"
     return "other"
+
+
+def _strict_tif_kind(tif, name):
+    try:
+        return _classify_tif_kind(tif)
+    except Exception as e:  # noqa: BLE001
+        raise IDAError(
+            "TYPE_READ_FAILED",
+            f"failed to classify type '{name}': {e}") from e
+
+
+def _best_effort_tif_kind(tif):
+    try:
+        return _classify_tif_kind(tif), "exact"
+    except Exception:  # noqa: BLE001
+        return "unknown", "unavailable"
 
 
 def list_local_types(name_filter=None):
@@ -27,7 +41,7 @@ def list_local_types(name_filter=None):
     name_filter 非空时只返回名称包含该子串（不区分大小写）的类型。"""
     def do():
         result = []
-        nf = name_filter.lower() if name_filter else None
+        nf = name_filter.casefold() if name_filter else None
         limit = idc.get_ordinal_limit()   # 本地类型数 + 1
         if not limit or limit <= 1:
             return result
@@ -35,61 +49,93 @@ def list_local_types(name_filter=None):
             name = idc.get_numbered_type_name(ordinal)
             if not name:
                 continue
-            if nf and nf not in name.lower():
+            if nf and nf not in name.casefold():
                 continue
-            tif = ida_typeinf.tinfo_t()
-            kind = "other"
-            if tif.get_numbered_type(ida_typeinf.get_idati(), ordinal):
-                kind = _tif_kind(tif)
-            result.append({"ordinal": ordinal, "name": name, "kind": kind})
+            kind = "unknown"
+            kind_status = "unavailable"
+            try:
+                tif = ida_typeinf.tinfo_t()
+                if tif.get_numbered_type(ida_typeinf.get_idati(), ordinal):
+                    kind, kind_status = _best_effort_tif_kind(tif)
+            except Exception:  # noqa: BLE001
+                pass
+            result.append({
+                "ordinal": ordinal,
+                "name": name,
+                "kind": kind,
+                "kind_status": kind_status,
+            })
         return result
 
     return run_in_main(do)
 
 
 def get_type(name):
-    """按名称取类型详情。返回 {name, kind, definition, members?}。"""
+    """按名称取完整类型详情和声明顺序成员。"""
     def do():
         tif = ida_typeinf.tinfo_t()
         if not tif.get_named_type(ida_typeinf.get_idati(), name):
             raise IDAError("TYPE_NOT_FOUND", f"type not found: {name}")
-        kind = _tif_kind(tif)
+        kind = _strict_tif_kind(tif, name)
         # 完整定义：PRTYPE_MULTI 多行 + PRTYPE_TYPE 类型声明 + PRTYPE_DEF 展开定义体
         try:
             definition = tif._print(
                 None,
                 ida_typeinf.PRTYPE_MULTI | ida_typeinf.PRTYPE_TYPE
                 | ida_typeinf.PRTYPE_DEF,
-            ) or str(tif)
+            )
         except Exception:  # noqa: BLE001
             definition = str(tif)
+            definition_source = "string_fallback"
+        else:
+            if definition:
+                definition_source = "ida_print"
+            else:
+                definition = str(tif)
+                definition_source = "string_fallback"
+        size = tif.get_size()
         info = {
             "name": name,
             "kind": kind,
             "definition": definition,
-            "size": tif.get_size() if tif.get_size() != idaapi.BADSIZE else None,
+            "definition_source": definition_source,
+            "size": size if size != idaapi.BADSIZE else None,
         }
+        members = []
         if kind in ("struct", "union"):
-            members = []
             try:
-                for udm in tif.iter_struct():
+                for member_index, udm in enumerate(tif.iter_udt()):
+                    bit_offset = udm.offset
+                    bit_width = udm.size
+                    offset, size = bitfield_byte_envelope(
+                        bit_offset, bit_width)
                     members.append({
+                        "member_index": member_index,
                         "name": udm.name,
-                        "offset": udm.offset // 8,   # bit → byte
-                        "size": udm.size // 8,
+                        "offset": offset,
+                        "size": size,
+                        "bit_offset": bit_offset,
+                        "bit_width": bit_width,
+                        "is_bitfield": read_bitfield_marker(udm),
                         "type": str(udm.type),
                     })
-            except Exception:  # noqa: BLE001
-                pass
-            info["members"] = members
+            except Exception as e:  # noqa: BLE001
+                raise IDAError(
+                    "TYPE_READ_FAILED",
+                    f"failed to read members for type '{name}': {e}") from e
         elif kind == "enum":
-            members = []
             try:
-                for edm in tif.iter_enum():
-                    members.append({"name": edm.name, "value": edm.value})
-            except Exception:  # noqa: BLE001
-                pass
-            info["members"] = members
+                for member_index, edm in enumerate(tif.iter_enum()):
+                    members.append({
+                        "member_index": member_index,
+                        "name": edm.name,
+                        "value": edm.value,
+                    })
+            except Exception as e:  # noqa: BLE001
+                raise IDAError(
+                    "TYPE_READ_FAILED",
+                    f"failed to read members for type '{name}': {e}") from e
+        info["members"] = members
         return info
 
     return run_in_main(do)

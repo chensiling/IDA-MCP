@@ -72,11 +72,33 @@ def search_bytes(hex_pattern):
     return run_in_main(do)
 
 
-def search_imm(value):
+def search_imm(value, offset=0, limit=SEARCH_HARD_LIMIT):
+    """Return one bounded page of immediate matches with explicit completeness."""
     def do():
+        if (isinstance(offset, bool) or not isinstance(offset, int)
+                or offset < 0):
+            raise IDAError(
+                "INVALID_PARAM", "immediate offset must be non-negative")
+        if (isinstance(limit, bool) or not isinstance(limit, int)
+                or not 1 <= limit <= SEARCH_HARD_LIMIT):
+            raise IDAError(
+                "INVALID_PARAM",
+                f"immediate limit must be between 1 and {SEARCH_HARD_LIMIT}",
+            )
+
         result = []
         min_ea = idaapi.inf_get_min_ea()
         end = idaapi.inf_get_max_ea()
+        seen = 0
+
+        def add_match(ea):
+            nonlocal seen
+            if seen >= offset and len(result) < limit:
+                result.append({
+                    "ea": ea,
+                    "func_name": ida_funcs.get_func_name(ea) or "",
+                })
+            seen += 1
 
         # find_imm also skips the starting EA.  Handle EA 0 explicitly because
         # subtracting one would wrap to BADADDR.
@@ -87,23 +109,78 @@ def search_imm(value):
                     if op.type == ida_ua.o_void:
                         break
                     if op.type == ida_ua.o_imm and op.value == value:
-                        result.append({
-                            "ea": min_ea,
-                            "func_name": ida_funcs.get_func_name(min_ea) or "",
-                        })
+                        add_match(min_ea)
                         break
+        if len(result) >= limit:
+            probe, _op = ida_search.find_imm(  # type: ignore
+                min_ea, ida_search.SEARCH_DOWN, value)
+            if probe != idaapi.BADADDR and probe <= min_ea:
+                raise IDAError(
+                    "INTERNAL", "immediate search traversal did not advance")
+            return {
+                "items": result,
+                "next_offset": offset + len(result),
+                "complete": probe == idaapi.BADADDR,
+            }
         ea = min_ea - 1 if min_ea > 0 else min_ea
         while ea < end and ea != idaapi.BADADDR:
             # find_imm 运行时返回 (ea, opnum) 元组；stub 误标为 int，故忽略类型检查
             found, _op = ida_search.find_imm(ea, ida_search.SEARCH_DOWN, value)  # type: ignore
             if found == idaapi.BADADDR:
                 break
-            result.append({"ea": found,
-                           "func_name": ida_funcs.get_func_name(found) or ""})
-            if len(result) >= SEARCH_HARD_LIMIT:
-                break
+            if found <= ea:
+                raise IDAError(
+                    "INTERNAL", "immediate search traversal did not advance")
+            add_match(found)
+            if len(result) >= limit:
+                probe, _op = ida_search.find_imm(  # type: ignore
+                    found, ida_search.SEARCH_DOWN, value)
+                if probe != idaapi.BADADDR and probe <= found:
+                    raise IDAError(
+                        "INTERNAL", "immediate search traversal did not advance")
+                return {
+                    "items": result,
+                    "next_offset": offset + len(result),
+                    "complete": probe == idaapi.BADADDR,
+                }
             ea = found
-        return result
+
+        if seen < offset:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"immediate offset {offset} exceeds match count {seen}",
+            )
+        return {
+            "items": result,
+            "next_offset": offset + len(result),
+            "complete": True,
+        }
+
+    return run_in_main(do)
+
+
+def filter_immediate_eas(value, eas):
+    """Return EAs in a bounded input page containing the immediate value."""
+    def do():
+        if not isinstance(eas, list) or len(eas) > SEARCH_HARD_LIMIT:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"eas must be a list with at most {SEARCH_HARD_LIMIT} items",
+            )
+        matches = []
+        for ea in eas:
+            if isinstance(ea, bool) or not isinstance(ea, int):
+                raise IDAError("INVALID_PARAM", "each EA must be an integer")
+            insn = idautils.DecodeInstruction(ea)
+            if insn is None:
+                continue
+            for op in insn.ops:
+                if op.type == ida_ua.o_void:
+                    break
+                if op.type == ida_ua.o_imm and op.value == value:
+                    matches.append(ea)
+                    break
+        return matches
 
     return run_in_main(do)
 

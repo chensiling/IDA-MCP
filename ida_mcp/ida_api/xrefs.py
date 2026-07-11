@@ -11,9 +11,22 @@ from .core import *  # noqa: F401,F403
 def get_xrefs_to(ea):
     def do():
         refs = []
+        function_cache = {}
         for xref in idautils.XrefsTo(ea):
+            func = ida_funcs.get_func(xref.frm)
+            if func is None:
+                from_func_ea = None
+                from_func_name = None
+            else:
+                from_func_ea = func.start_ea
+                if from_func_ea not in function_cache:
+                    function_cache[from_func_ea] = (
+                        ida_funcs.get_func_name(from_func_ea) or "")
+                from_func_name = function_cache[from_func_ea]
             refs.append({"from_ea": xref.frm,
-                         "type": idautils.XrefTypeName(xref.type)})
+                         "type": idautils.XrefTypeName(xref.type),
+                         "from_func_ea": from_func_ea,
+                         "from_func_name": from_func_name})
         return refs
 
     return run_in_main(do)
@@ -71,7 +84,41 @@ def get_func_callers(ea):
                 from_func_name = ida_name.get_name(xref.frm) or ""
             result.append({"from_ea": xref.frm,
                            "from_func_ea": from_func_ea,
-                           "from_func_name": from_func_name})
+                           "from_func_name": from_func_name,
+                           "type": idautils.XrefTypeName(xref.type)})
+        return result
+
+    return run_in_main(do)
+
+
+def get_func_callsites(ea):
+    """Return every static callsite in a function without deduplication."""
+    def do():
+        func = ida_funcs.get_func(ea)
+        if not func:
+            raise IDAError("NO_FUNCTION", f"no function at {hex(ea)}")
+        result = []
+        for item_ea in idautils.FuncItems(func.start_ea):
+            for xref in idautils.XrefsFrom(item_ea, ida_xref.XREF_FAR):
+                if xref.type not in (ida_xref.fl_CN, ida_xref.fl_CF):
+                    continue
+                target = xref.to
+                callee = ida_funcs.get_func(target)
+                if callee:
+                    to_ea = callee.start_ea
+                    target_name = (ida_funcs.get_func_name(to_ea)
+                                   or ida_name.get_name(to_ea)
+                                   or hex(to_ea))
+                else:
+                    to_ea = target
+                    target_name = ida_name.get_name(to_ea) or hex(to_ea)
+                result.append({
+                    "from_ea": item_ea,
+                    "to_ea": to_ea,
+                    "direct_target_ea": target,
+                    "to_func_name": target_name,
+                    "type": idautils.XrefTypeName(xref.type),
+                })
         return result
 
     return run_in_main(do)

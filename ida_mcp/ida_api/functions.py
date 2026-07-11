@@ -6,6 +6,7 @@ SEARCH_HARD_LIMIT）在 core.py，此处 `from .core import *` 引入。函数�
 """
 
 from .core import *  # noqa: F401,F403
+from .._contracts import is_valid_ea
 
 
 def decompile(ea):
@@ -42,6 +43,118 @@ def get_disasm(ea, count):
                 break
             cur = nxt
         return result
+
+    return run_in_main(do)
+
+
+def get_disassembly(ea, count):
+    """Read bounded disassembly, bytes, and static code references in one batch."""
+    def do():
+        func = ida_funcs.get_func(ea)
+        if func:
+            function_ea = func.start_ea
+            function_end_ea = func.end_ea
+            function_name = (ida_funcs.get_func_name(function_ea)
+                             or ida_name.get_name(function_ea)
+                             or hex(function_ea))
+        else:
+            function_ea = None
+            function_end_ea = None
+            function_name = None
+
+        instructions = []
+        cur = ea
+        next_ea = None
+        complete = False
+        stop_reason = None
+        for _ in range(count):
+            if cur == idaapi.BADADDR:
+                complete = function_end_ea is None
+                stop_reason = (
+                    "loaded_range_end" if complete else "traversal_stalled")
+                break
+            if function_end_ea is not None and cur >= function_end_ea:
+                complete = True
+                stop_reason = "function_end"
+                break
+            if not ida_bytes.is_loaded(cur):
+                complete = function_end_ea is None
+                stop_reason = (
+                    "loaded_range_end" if complete else "traversal_stalled")
+                break
+
+            item_size = max(ida_bytes.get_item_size(cur), 1)
+            if function_end_ea is not None:
+                item_size = min(item_size, function_end_ea - cur)
+            raw = ida_bytes.get_bytes(cur, item_size) or b""
+            line = ida_lines.tag_remove(idc.generate_disasm_line(cur, 0) or "")
+
+            flow_refs = []
+            for xref in idautils.XrefsFrom(cur, ida_xref.XREF_FAR):
+                is_code = getattr(xref, "iscode", False)
+                if callable(is_code):
+                    is_code = is_code()
+                if not is_code:
+                    continue
+                direct_target_ea = xref.to
+                target_func = ida_funcs.get_func(direct_target_ea)
+                if target_func:
+                    target_ea = target_func.start_ea
+                    target_name = (
+                        ida_funcs.get_func_name(target_ea)
+                        or ida_name.get_name(target_ea)
+                        or hex(target_ea))
+                else:
+                    target_ea = direct_target_ea
+                    target_name = (ida_name.get_name(target_ea)
+                                   or hex(target_ea))
+                flow_refs.append({
+                    "direct_target_ea": direct_target_ea,
+                    "target_ea": target_ea,
+                    "target_name": target_name,
+                    "type": (idautils.XrefTypeName(xref.type)
+                             or str(xref.type)),
+                })
+
+            instructions.append({
+                "ea": cur,
+                "bytes": raw.hex(),
+                "disasm": line,
+                "flow_refs": flow_refs,
+            })
+
+            nxt = idc.next_head(cur)
+            if nxt == idaapi.BADADDR or nxt <= cur:
+                complete = function_end_ea is None
+                stop_reason = (
+                    "loaded_range_end" if complete else "traversal_stalled")
+                cur = None
+                break
+            cur = nxt
+            if function_end_ea is not None and cur >= function_end_ea:
+                complete = True
+                stop_reason = "function_end"
+                cur = None
+                break
+        else:
+            if cur is not None and ida_bytes.is_loaded(cur):
+                next_ea = cur
+                stop_reason = "count_limit"
+            elif function_end_ea is not None:
+                stop_reason = "traversal_stalled"
+            else:
+                complete = True
+                stop_reason = "loaded_range_end"
+
+        return {
+            "function_ea": function_ea,
+            "function_name": function_name,
+            "function_end_ea": function_end_ea,
+            "instructions": instructions,
+            "next_ea": next_ea,
+            "complete": complete,
+            "stop_reason": stop_reason,
+        }
 
     return run_in_main(do)
 
@@ -92,11 +205,10 @@ def get_func_by_name(name):
 
 def get_entry_point():
     def do():
-        if ida_entry.get_entry_qty() <= 0:
+        ea = ida_ida.inf_get_start_ea()
+        if not is_valid_ea(ea, idaapi.BADADDR):
             raise IDAError("NO_ENTRY", "no entry point in database")
-        ordinal = ida_entry.get_entry_ordinal(0)
-        ea = ida_entry.get_entry(ordinal)
-        name = ida_entry.get_entry_name(ordinal) or ida_name.get_name(ea)
+        name = ida_funcs.get_func_name(ea) or ida_name.get_name(ea)
         return {"ea": ea, "name": name}
 
     return run_in_main(do)

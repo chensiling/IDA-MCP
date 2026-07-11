@@ -2,7 +2,9 @@
 import socket
 
 from . import protocol
-from .registry import FileEntry
+from .runtime_contract import (
+    ALL_TOOL_NAMES, READ_TOOL_NAMES, read_only_error, unknown_tool_error,
+)
 
 _NO_FILE_TOOLS = frozenset()
 WORKER_CONNECT_TIMEOUT = 5.0
@@ -36,18 +38,18 @@ class Router:
                 'message': f"Unknown file_id '{fid}'. "
                            f"Use list_files to see available files."}}
 
+        if not isinstance(tool, str) or tool not in ALL_TOOL_NAMES:
+            return unknown_tool_error(tool)
+        if entry.read_only and tool not in READ_TOOL_NAMES:
+            return read_only_error(tool)
+
         if entry.local:
             return self.local_handler(tool, args)
         else:
             return self._call_remote(entry, tool, args)
 
     def _list_files(self):
-        entries = self.registry.list_all()
-        return [
-            {'fid': e.fid, 'name': e.name, 'arch': e.arch,
-             'bits': e.bits, 'path': e.path}
-            for e in entries
-        ]
+        return [entry.public_metadata() for entry in self.registry.list_all()]
 
     def _call_remote(self, entry, tool, args):
         worker_port = entry.call_port

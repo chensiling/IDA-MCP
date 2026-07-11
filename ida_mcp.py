@@ -16,6 +16,7 @@ import threading
 import time
 
 import idaapi
+import ida_hexrays
 import ida_ida
 import ida_nalt
 
@@ -31,27 +32,47 @@ _server_launch_lock = threading.Lock()
 _last_server_launch = 0.0
 
 
-def _server_running():
+def _probe_server():
     from ida_mcp import protocol
+    from ida_mcp.runtime_contract import (
+        INVALID_REGISTRATION,
+        inspect_server_ack,
+    )
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    connected = False
     try:
         s.settimeout(0.5)
         s.connect(('127.0.0.1', MCP_INTERNAL_PORT))
+        connected = True
         protocol.send_msg(s, {'t': protocol.MSG_PROBE})
         response = protocol.recv_msg(s)
-        return bool(
-            isinstance(response, dict)
-            and response.get('t') == protocol.MSG_ACK
-            and response.get('ok') is True
-            and response.get('service') == 'ida-mcp')
-    except (ConnectionRefusedError, OSError, TimeoutError):
-        return False
+        return inspect_server_ack(response)
+    except (ConnectionRefusedError, OSError, TimeoutError) as ex:
+        if not connected:
+            return 'unreachable', {
+                'code': 'SERVER_UNREACHABLE',
+                'message': str(ex) or 'Server is unreachable',
+            }
+        return 'incompatible', {
+            'code': INVALID_REGISTRATION,
+            'message': f'Server probe failed after connection: {ex}',
+        }
+    except Exception as ex:
+        return 'incompatible', {
+            'code': INVALID_REGISTRATION,
+            'message': f'Server probe returned an invalid response: {ex}',
+        }
     finally:
         try:
             s.close()
         except Exception:
             pass
+
+
+def _server_running():
+    status, _ = _probe_server()
+    return status == 'compatible'
 
 
 def _launch_server():
@@ -73,24 +94,44 @@ def _launch_server():
     return True
 
 
-def _wait_for_server(timeout=30):
+def _wait_for_server(timeout=30, return_on_unreachable=False):
     deadline = time.time() + timeout
+    last = ('unreachable', {
+        'code': 'SERVER_UNREACHABLE',
+        'message': 'Server is unreachable',
+    })
     while time.time() < deadline:
-        if _server_running():
-            return True
+        last = _probe_server()
+        if (last[0] in ('compatible', 'incompatible')
+                or (return_on_unreachable and last[0] == 'unreachable')):
+            return last
         time.sleep(0.5)
-    return False
+    return last
 
 
 def _ensure_server_available():
     """Relaunch a missing Server, rate-limited within this IDA process."""
     global _last_server_launch
 
-    if _server_running():
+    status, diagnostic = _probe_server()
+    if status == 'compatible':
         return True
+    if status == 'incompatible':
+        print(f"[ida-mcp] Incompatible Server: "
+              f"{diagnostic['code']}: {diagnostic['message']}")
+        return False
+    if status == 'stopping':
+        print("[ida-mcp] Server is stopping; waiting before reconnect")
+        return False
     with _server_launch_lock:
-        if _server_running():
+        status, diagnostic = _probe_server()
+        if status == 'compatible':
             return True
+        if status != 'unreachable':
+            if status == 'incompatible':
+                print(f"[ida-mcp] Incompatible Server: "
+                      f"{diagnostic['code']}: {diagnostic['message']}")
+            return False
         now = time.monotonic()
         if now - _last_server_launch < SERVER_LAUNCH_COOLDOWN:
             return False
@@ -104,12 +145,17 @@ def _collect_file_info():
     path = ida_nalt.get_input_file_path()
     if not path:
         return None
+    try:
+        hexrays = bool(ida_hexrays.init_hexrays_plugin())
+    except Exception:
+        hexrays = False
     return {
         'fid': get_file_id(path),
         'name': os.path.basename(path),
         'arch': ida_ida.inf_get_procname().strip(),
         'bits': 64 if ida_ida.inf_is_64bit() else 32,
         'path': path,
+        'hexrays': hexrays,
     }
 
 
@@ -203,13 +249,26 @@ class IDAMCPPlugin(idaapi.plugin_t):
     help = ""
 
     def init(self):
-        if not _server_running():
+        status, diagnostic = _probe_server()
+        if status == 'stopping':
+            print("[ida-mcp] Existing Server is stopping; waiting...")
+            status, diagnostic = _wait_for_server(return_on_unreachable=True)
+        if status == 'stopping':
+            print("[ida-mcp] Server is still stopping; Worker startup deferred")
+            return idaapi.PLUGIN_KEEP
+        if status == 'incompatible':
+            print(f"[ida-mcp] Incompatible Server: "
+                  f"{diagnostic['code']}: {diagnostic['message']}")
+            return idaapi.PLUGIN_KEEP
+        if status == 'unreachable':
             print("[ida-mcp] No server found, launching...")
             if not _launch_server():
                 print("[ida-mcp] Failed to launch server")
                 return idaapi.PLUGIN_KEEP
-            if not _wait_for_server():
-                print("[ida-mcp] Server did not start in time")
+            status, diagnostic = _wait_for_server()
+            if status != 'compatible':
+                print(f"[ida-mcp] Server did not become compatible: "
+                      f"{diagnostic['code']}: {diagnostic['message']}")
                 return idaapi.PLUGIN_KEEP
             print("[ida-mcp] Server started")
 

@@ -7,8 +7,16 @@ FastMCP + streamable-http，跑在 IDA 内嵌 Python 里。工具直接调用 id
 import hashlib
 import json
 import os
+from typing import Annotated, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
+from pydantic import Field
+
+from .runtime_contract import (
+    EXPECTED_TOOL_COUNT, READ_ONLY_GUIDANCE, UNKNOWN_TOOL_GUIDANCE,
+)
 
 try:
     from . import ida_api as api
@@ -33,7 +41,13 @@ __all__ = [
     # 转发依赖
     "api", "IDAError", "categorize_import",
     # 实例与常量
-    "mcp", "HTTP_HOST", "HTTP_PORT",
+    "mcp", "HTTP_HOST", "HTTP_PORT", "EXPECTED_TOOL_COUNT",
+    "READ_ONLY_TOOL", "WRITE_TOOL",
+    "MaxLines", "ResultLimit", "CallGraphDepth", "ReachabilityDepth",
+    "DataReadOffset", "DataReadSize", "DereferenceDepth",
+    "TypeDefinitionOffset", "TypeDefinitionLimit",
+    "SearchType", "GraphDirection", "CommentPosition", "DataType",
+    "StringType", "SliceMode", "XrefScope",
     "INTERNAL_PORT",
     "DEFAULT_MAX_LINES", "DEFAULT_SEARCH_LIMIT", "DEFAULT_XREF_LIMIT",
     "DEFAULT_XREF_LIGHT_LIMIT", "STRING_MIN_LENGTH", "STRINGS_LIMIT",
@@ -43,11 +57,13 @@ __all__ = [
     "DATA_XREF_LIMIT", "DATA_BYTES_PREVIEW",
     "ERROR_MESSAGES", "_ADDR_FIELDS", "_ADDR_LIST_FIELDS",
     # 错误 / 转换 / 输出
+    "MCPToolError", "tool_error_payload", "raise_tool_error",
     "translate_error", "error_result", "ea_to_hex", "resolve_identifier",
     "format_output", "_to_hex", "_to_dec", "_normalize_numbers",
     # 共享辅助
     "_truncate_lines", "_decompile_or_disasm", "_try_parse_int",
-    "_validate_positive_int", "_cfg_has_cycle",
+    "_validate_positive_int", "_validate_bounded_int", "_validate_bool",
+    "_cfg_has_cycle",
     "_containing_function", "_suggest_name", "_func_start",
     "_callees_of", "_callers_of", "_segment_of",
     # 多实例
@@ -61,7 +77,6 @@ __all__ = [
 HTTP_HOST = "127.0.0.1"
 HTTP_PORT = 8765
 INTERNAL_PORT = 8766
-
 DEFAULT_MAX_LINES = 200
 DEFAULT_SEARCH_LIMIT = 30
 DEFAULT_XREF_LIMIT = 30
@@ -75,6 +90,39 @@ CONTEXT_PREVIEW_LINES = 20
 BADADDR = 0xFFFFFFFFFFFFFFFF
 
 mcp = FastMCP("ida-mcp", host=HTTP_HOST, port=HTTP_PORT)
+
+READ_ONLY_TOOL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+WRITE_TOOL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+
+MaxLines = Annotated[int, Field(ge=1, le=2000)]
+ResultLimit = Annotated[int, Field(ge=1, le=500)]
+CallGraphDepth = Annotated[int, Field(ge=1, le=5)]
+ReachabilityDepth = Annotated[int, Field(ge=1, le=10)]
+DataReadOffset = Annotated[int, Field(ge=0, le=1048576)]
+DataReadSize = Annotated[int, Field(ge=1, le=4096)]
+DereferenceDepth = Annotated[int, Field(ge=0, le=4)]
+TypeDefinitionOffset = Annotated[int, Field(ge=0, le=10000000)]
+TypeDefinitionLimit = Annotated[int, Field(ge=1, le=65536)]
+SearchType = Literal[
+    "string", "function", "import", "immediate", "global", "data",
+    "export", "all",
+]
+GraphDirection = Literal["callees", "callers", "both"]
+CommentPosition = Literal["line", "function", "anterior", "posterior"]
+DataType = Literal["byte", "word", "dword", "qword"]
+StringType = Literal["c", "unicode"]
+SliceMode = Literal["auto", "start", "address"]
+XrefScope = Literal["auto", "address", "function"]
 
 # ---- 多实例：工具注册表与路由器 ----
 _ALL_TOOLS = {}
@@ -98,6 +146,9 @@ def _route_if_remote(f, tool_name, **kwargs):
     if router is None:
         return ""
     result = router.dispatch(tool_name, f, kwargs)
+    if (isinstance(result, dict) and set(result) == {"error"}
+            and isinstance(result["error"], dict)):
+        raise_tool_error(result)
     return format_output(result)
 
 
@@ -126,6 +177,7 @@ ERROR_MESSAGES = {
     "EXECUTE_SYNC_FAILED": "IDA could not schedule the operation on its main thread.",
     "HEXRAYS_UNAVAILABLE": "The Hex-Rays decompiler is unavailable or could not be initialized.",
     "TYPE_NOT_FOUND": "The requested local type does not exist.",
+    "TYPE_READ_FAILED": "IDA could not read the complete local type definition.",
     "TYPE_PARSE_FAILED": "IDA could not parse the supplied type declaration.",
     "SET_TYPE_FAILED": "IDA could not apply the supplied type.",
     "NO_SWITCH": "No switch or jump table exists at the specified address.",
@@ -138,6 +190,13 @@ ERROR_MESSAGES = {
     "MAKE_CODE_FAILED": "IDA could not create an instruction at the specified address.",
     "MAKE_DATA_FAILED": "IDA could not create the requested data item.",
     "MAKE_STRING_FAILED": "IDA could not create a string at the specified address.",
+    "MULTI_FILE": "Select a connected IDA target with list_files and pass its f value.",
+    "UNKNOWN_FILE": "The selected IDA target is unavailable. Refresh targets with list_files.",
+    "WORKER_ERROR": "The selected IDA Worker failed to return a valid result.",
+    "WORKER_TIMEOUT": "Connecting to the selected IDA Worker timed out.",
+    "RESULT_UNKNOWN": "The Worker received the request, but completion could not be confirmed. Verify state before retrying.",
+    "READ_ONLY": READ_ONLY_GUIDANCE,
+    "UNKNOWN_TOOL": UNKNOWN_TOOL_GUIDANCE,
 }
 
 
@@ -154,13 +213,46 @@ DATA_BYTES_PREVIEW = 16
 
 # —— 共享辅助 ——
 
+class MCPToolError(ToolError):
+    """FastMCP tool error that preserves a transport-safe structured payload."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        super().__init__(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def tool_error_payload(error):
+    """Build the canonical MCP error payload without losing specific details."""
+    if isinstance(error, dict):
+        payload = error if set(error) == {"error"} else {"error": error}
+        detail = dict(payload["error"])
+        code = str(detail.get("code") or "INTERNAL")
+        message = str(detail.get("message") or "Unknown tool error")
+    else:
+        code = str(getattr(error, "code", "INTERNAL"))
+        message = str(error)
+        detail = {"code": code, "message": message}
+    detail["code"] = code
+    detail["message"] = message
+    guidance = ERROR_MESSAGES.get(code)
+    if guidance and not detail.get("guidance"):
+        detail["guidance"] = guidance
+    return {"error": detail}
+
+
+def raise_tool_error(error):
+    raise MCPToolError(tool_error_payload(error))
+
+
 def translate_error(e):
+    """Compatibility helper for status results that need generic guidance."""
     return ERROR_MESSAGES.get(e.code) or str(e)
 
 
 
 def error_result(e):
-    return format_output({"error": {"code": e.code, "message": translate_error(e)}})
+    """Compatibility name retained for tools; failures now use MCP isError."""
+    raise_tool_error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +305,13 @@ _ADDR_FIELDS = frozenset({
     "ea", "start", "end", "target", "address",
     "image_base", "min_ea", "max_ea", "entry_ea",
     "string_ea", "ref_ea", "from_ea", "to_ea", "from_func_ea", "func_ea",
+    "requested_ea", "function_ea", "function_end_ea", "next_ea",
+    "statement_ea", "callsite_ea", "direct_target_ea", "target_ea",
+    "read_ea", "raw_value",
 })
-_ADDR_LIST_FIELDS = frozenset({"succs", "preds", "targets", "sites"})
+_ADDR_LIST_FIELDS = frozenset({
+    "succs", "preds", "targets", "sites", "referenced_targets",
+})
 
 
 
@@ -300,6 +397,24 @@ def _validate_positive_int(value, name, maximum):
     if value < 1 or value > maximum:
         raise IDAError(
             "INVALID_PARAM", f"{name} must be between 1 and {maximum}")
+    return value
+
+
+def _validate_bounded_int(value, name, minimum, maximum):
+    """Validate an integer range without accepting bool as an integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise IDAError("INVALID_PARAM", f"{name} must be an integer")
+    if value < minimum or value > maximum:
+        raise IDAError(
+            "INVALID_PARAM",
+            f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _validate_bool(value, name):
+    """Reject integer/string coercions when tools are called directly."""
+    if not isinstance(value, bool):
+        raise IDAError("INVALID_PARAM", f"{name} must be a boolean")
     return value
 
 

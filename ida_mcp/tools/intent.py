@@ -1,11 +1,15 @@
 """MCP 工具（intent 域）。
 """
 
+from typing import Optional
+
 from .._base import *  # noqa: F401,F403
+from .._contracts import (CursorError, decode_data_cursor,
+                          encode_data_cursor)
 
 
-@mcp.tool()
-def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def explore_function(identifier: str, max_lines: MaxLines = DEFAULT_MAX_LINES,
                      f: str = None) -> str:
     """Understand what a single function does, in one call. Aggregates everything
     needed to reason about it: pseudocode, callees (each tagged as import and with
@@ -111,114 +115,206 @@ def explore_function(identifier: str, max_lines: int = DEFAULT_MAX_LINES,
         return error_result(e)
 
 
-@mcp.tool()
-def explore_data(identifier: str, f: str = None) -> str:
-    """Understand a data address or global variable in one call: its name, type,
-    raw byte preview (and decoded string if applicable), containing segment, and
-    — crucially — which functions READ it versus WRITE it (reference kind is
-    split into reads/writes/address-taken). Use this to reason about a global's
-    role and data flow. Complements trace_data: this gives a data-centric
-    profile (type/value/read-write); trace_data drills into each reference site's
-    code. Categories/roles are for you to infer; the tool only reports facts."""
-    r = _route_if_remote(f, "explore_data", identifier=identifier)
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def explore_data(identifier: str, read_offset: DataReadOffset = 0,
+                 read_size: DataReadSize = DATA_BYTES_PREVIEW,
+                 dereference_depth: DereferenceDepth = 0,
+                 xref_limit: ResultLimit = DATA_XREF_LIMIT,
+                 cursor: Optional[str] = None, f: str = None) -> str:
+    """Read a configurable raw-byte window for an `identifier` given as a symbol
+    name or hex/decimal address string, and follow a bounded chain only with exact
+    IDA pointer type evidence. Classify references into independently cursor-paged
+    read, write, address-taken, and other roles. Use this data profile for values
+    and roles; use trace_data for code context at reference sites."""
+    r = _route_if_remote(
+        f, "explore_data", identifier=identifier, read_offset=read_offset,
+        read_size=read_size, dereference_depth=dereference_depth,
+        xref_limit=xref_limit, cursor=cursor)
     if r: return r
     try:
+        read_offset = _validate_bounded_int(
+            read_offset, "read_offset", 0, 1048576)
+        read_size = _validate_bounded_int(
+            read_size, "read_size", 1, 4096)
+        dereference_depth = _validate_bounded_int(
+            dereference_depth, "dereference_depth", 0, 4)
+        xref_limit = _validate_positive_int(
+            xref_limit, "xref_limit", 500)
+        if cursor is not None and not isinstance(cursor, str):
+            raise IDAError("INVALID_PARAM", "cursor must be a string or null")
+
         ea = resolve_identifier(identifier)
+        target_fingerprint = api.get_database_fingerprint()
+        if cursor is None:
+            offsets = {
+                "read_by_offset": 0,
+                "written_by_offset": 0,
+                "address_taken_by_offset": 0,
+                "other_refs_offset": 0,
+            }
+        else:
+            try:
+                offsets = decode_data_cursor(
+                    cursor, target_fingerprint, ea, read_offset, read_size,
+                    dereference_depth)
+            except CursorError as e:
+                raise IDAError(
+                    "INVALID_PARAM", f"invalid cursor: {e}") from e
 
-        try:
-            name = api.get_name(ea)["name"]
-        except IDAError:
-            name = ""
-
-        try:
-            dtype = api.get_data_type(ea)["type"]
-        except IDAError:
-            dtype = ""
-
-        try:
-            byte_hex = api.get_bytes(ea, DATA_BYTES_PREVIEW)["hex_bytes"]
-        except IDAError:
-            byte_hex = ""
-
-        string_value = None
-        try:
-            for s in api.get_strings():
-                if s["ea"] == ea:
-                    string_value = s["value"]
-                    break
-        except IDAError:
-            pass
-
-        segment = _segment_of(ea)
-
-        readers, writers, addr_taken, other = [], [], [], []
-        total_refs = 0
-        try:
-            xrefs = api.get_xrefs_to(ea)
-        except IDAError:
-            xrefs = []
-        for x in xrefs:
-            total_refs += 1
-            t = x.get("type", "")
-            cf = _containing_function(x["from_ea"])
-            site = {"ea": ea_to_hex(x["from_ea"]),
-                    "function": cf["name"] if cf else None}
-            if t == "Data_Write":
-                bucket = writers
-            elif t == "Data_Read":
-                bucket = readers
-            elif t == "Data_Offset":
-                bucket = addr_taken
+        profile = api.get_data_profile(
+            ea, read_offset=read_offset, read_size=read_size,
+            dereference_depth=dereference_depth)
+        role_names = (
+            "read_by", "written_by", "address_taken_by", "other_refs")
+        site_counts = {role: 0 for role in role_names}
+        grouped = {role: {} for role in role_names}
+        for xref in api.get_xrefs_to(ea):
+            site = xref["from_ea"]
+            xref_type = xref.get("type", "")
+            if xref_type == "Data_Read":
+                role = "read_by"
+            elif xref_type == "Data_Write":
+                role = "written_by"
+            elif xref_type == "Data_Offset":
+                role = "address_taken_by"
             else:
-                bucket = other
-            bucket.append(site)
+                role = "other_refs"
+            site_counts[role] += 1
 
-        def dedup(lst):
-            seen, out = set(), []
-            for s in lst:
-                key = s["function"] or s["ea"]
-                if key not in seen:
-                    seen.add(key)
-                    out.append(s)
-            return out
+            if "from_func_ea" in xref:
+                function_ea = xref["from_func_ea"]
+                function_name = xref.get("from_func_name")
+                if function_ea is None:
+                    group_key = ("site", site)
+                else:
+                    group_key = ("function", function_ea)
+            else:
+                try:
+                    func_info = api.get_func_info(site)
+                except IDAError as e:
+                    if e.code != "NO_FUNCTION":
+                        raise
+                    function_ea = None
+                    function_name = None
+                    group_key = ("site", site)
+                else:
+                    function_ea = func_info["ea"]
+                    function_name = func_info["name"]
+                    group_key = ("function", function_ea)
 
-        readers_out = dedup(readers)
-        writers_out = dedup(writers)
-        addr_taken_out = dedup(addr_taken)
-        other_out = dedup(other)
+            representative = (site, xref_type)
+            group = grouped[role].get(group_key)
+            if group is None:
+                grouped[role][group_key] = {
+                    "ea": site,
+                    "function": function_name,
+                    "function_ea": function_ea,
+                    "xref_type": xref_type,
+                    "site_count": 1,
+                    "_representative": representative,
+                }
+            else:
+                group["site_count"] += 1
+                if representative < group["_representative"]:
+                    group["ea"] = site
+                    group["xref_type"] = xref_type
+                    group["_representative"] = representative
 
-        return format_output({
-            "ea": ea_to_hex(ea),
-            "name": name,
-            "type": dtype,
-            "bytes_preview": byte_hex,
-            "string_value": string_value,
-            "segment": segment,
+        references = {}
+        for role in role_names:
+            items = list(grouped[role].values())
+            items.sort(key=lambda item: (
+                item["function_ea"] if item["function_ea"] is not None
+                else BADADDR,
+                item["function"] or "",
+                item["ea"],
+                item["xref_type"],
+            ))
+            for item in items:
+                item.pop("_representative", None)
+            references[role] = items
+        role_specs = (
+            ("read_by", "read_by_offset"),
+            ("written_by", "written_by_offset"),
+            ("address_taken_by", "address_taken_by_offset"),
+            ("other_refs", "other_refs_offset"),
+        )
+        pages = {}
+        summary_roles = {}
+        next_offsets = {}
+        for role, offset_name in role_specs:
+            items = references[role]
+            offset = offsets[offset_name]
+            total = len(items)
+            if offset > total:
+                raise IDAError(
+                    "INVALID_PARAM",
+                    f"cursor {role} offset exceeds the current total")
+            end = min(offset + xref_limit, total)
+            page = items[offset:end]
+            pages[role] = page
+            next_offsets[offset_name] = end
+            summary_roles[role] = {
+                "offset": offset,
+                "returned": len(page),
+                "total": total,
+                "has_more": end < total,
+            }
+
+        has_more = any(
+            value["has_more"] for value in summary_roles.values())
+        next_cursor = None
+        if has_more:
+            try:
+                next_cursor = encode_data_cursor(
+                    target_fingerprint, ea, read_offset, read_size,
+                    dereference_depth,
+                    next_offsets["read_by_offset"],
+                    next_offsets["written_by_offset"],
+                    next_offsets["address_taken_by_offset"],
+                    next_offsets["other_refs_offset"],
+                )
+            except CursorError as e:
+                raise IDAError(
+                    "INVALID_PARAM", f"invalid cursor: {e}") from e
+
+        raw_reference_total = sum(site_counts.values())
+        output = {
+            "ea": profile["ea"],
+            "name": profile["name"],
+            "type": profile["type"],
+            "type_size": profile["type_size"],
+            "bytes_preview": profile["read"]["hex_bytes"],
+            "string_value": profile["string_value"],
+            "segment": profile["segment"],
+            "read": profile["read"],
+            "dereference": profile["dereference"],
             "reference_summary": {
-                "total": total_refs,
-                "read_count": len(readers),
-                "write_count": len(writers),
-                "address_taken_count": len(addr_taken),
-                "other_count": len(other),
+                "total": raw_reference_total,
+                "read_count": site_counts["read_by"],
+                "write_count": site_counts["written_by"],
+                "address_taken_count": site_counts["address_taken_by"],
+                "other_count": site_counts["other_refs"],
             },
-            "read_by": readers_out[:DATA_XREF_LIMIT],
-            "read_by_total": len(readers_out),
-            "read_by_truncated": len(readers_out) > DATA_XREF_LIMIT,
-            "written_by": writers_out[:DATA_XREF_LIMIT],
-            "written_by_total": len(writers_out),
-            "written_by_truncated": len(writers_out) > DATA_XREF_LIMIT,
-            "address_taken_by": addr_taken_out[:DATA_XREF_LIMIT],
-            "address_taken_by_total": len(addr_taken_out),
-            "address_taken_by_truncated": len(addr_taken_out) > DATA_XREF_LIMIT,
-            "other_refs": other_out[:DATA_XREF_LIMIT],
-            "other_refs_total": len(other_out),
-            "other_refs_truncated": len(other_out) > DATA_XREF_LIMIT,
-        })
+        }
+        for role, _offset_name in role_specs:
+            role_summary = summary_roles[role]
+            output[role] = pages[role]
+            output[f"{role}_total"] = role_summary["total"]
+            output[f"{role}_truncated"] = (
+                role_summary["total"] > role_summary["returned"])
+        output["summary"] = {
+            "offset": sum(next_offsets.values()),
+            **summary_roles,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }
+        return format_output(output)
     except IDAError as e:
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY_TOOL)
 def survey_capabilities(f: str = None) -> str:
     """Build a behavioral profile of the whole binary: imports grouped by
     deterministic capability category (crypto/network/file/process/registry/
@@ -268,8 +364,9 @@ def survey_capabilities(f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
-def review_string_usage(query: str, limit: int = 15, f: str = None) -> str:
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def review_string_usage(query: str, limit: ResultLimit = 15,
+                        f: str = None) -> str:
     """Find strings matching a query and show HOW they are used: for each match,
     the functions that reference it plus a short pseudocode snippet of the first
     referencing function. Use to answer 'where is this string used and why'

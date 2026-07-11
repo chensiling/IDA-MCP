@@ -4,7 +4,7 @@
 from .._base import *  # noqa: F401,F403
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY_TOOL)
 def binary_overview(f: str = None) -> str:
     """Get a high-level overview of the loaded binary: entry point with decompiled
     preview, imports grouped by category, notable strings with references, and
@@ -73,7 +73,7 @@ def binary_overview(f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY_TOOL)
 def binary_info(f: str = None) -> str:
     """Get low-level binary metadata: file name, file format, processor,
     bitness, endianness, image base, entry point, and address range. Complements
@@ -90,7 +90,7 @@ def binary_info(f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY_TOOL)
 def check_connection(f: str = None) -> str:
     """Check whether IDA has a binary loaded and the MCP server is responsive.
     Use this first if other tools misbehave, to confirm the analysis session is
@@ -104,16 +104,28 @@ def check_connection(f: str = None) -> str:
                                               "name": entry["name"]}})
     except IDAError as e:
         return format_output({"connected": True,
-                              "error": {"code": e.code,
-                                        "message": translate_error(e)}})
+                              "error": tool_error_payload(e)["error"]})
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def analysis_status(f: str = None) -> str:
+    """Get a non-blocking snapshot of IDA auto-analysis, Hex-Rays availability,
+    and the IDA kernel version. Use it to distinguish transport connectivity from
+    analysis readiness; this tool never waits for auto-analysis to finish."""
+    r = _route_if_remote(f, "analysis_status")
+    if r: return r
+    try:
+        return format_output(api.get_analysis_status())
+    except IDAError as e:
+        return error_result(e)
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
 def list_files() -> str:
     """List all connected IDA instances (files) in this multi-instance session.
-    Returns each file's id, name, architecture, bitness, and path. Use when
-    multiple IDA instances are connected to discover available targets. The
-    returned 'f' values can be passed to other tools' 'f' parameter."""
+    Returns target identity, read-only state, capabilities, and protocol/tool
+    versions. Use the returned 'fid' as another tool's 'f' value and check write
+    and Hex-Rays availability before choosing an operation."""
     router = _get_router()
     if router is None:
         return format_output({
@@ -122,12 +134,7 @@ def list_files() -> str:
                     "This is the only IDA instance."
         })
     try:
-        entries = router.registry.list_all()
-        files = [
-            {"fid": e.fid, "name": e.name, "arch": e.arch,
-             "bits": e.bits, "path": e.path}
-            for e in entries
-        ]
+        files = router._list_files()
         return format_output({
             "count": len(files),
             "files": files,
@@ -140,5 +147,6 @@ _ALL_TOOLS.update({
     "binary_overview": binary_overview,
     "binary_info": binary_info,
     "check_connection": check_connection,
+    "analysis_status": analysis_status,
     "list_files": list_files,
 })

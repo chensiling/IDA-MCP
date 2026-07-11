@@ -4,12 +4,13 @@
 from .._base import *  # noqa: F401,F403
 
 
-@mcp.tool()
-def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def call_graph(identifier: str, depth: CallGraphDepth = 2,
+               direction: GraphDirection = "callees",
                f: str = None) -> str:
     """Build a call graph from a function up to N levels. direction is 'callees'
     (functions it calls), 'callers' (functions that call it), or 'both'.
-    identifier accepts a name, hex address, or integer. Node count is capped;
+    identifier accepts a name or address string. Node count is capped;
     use small depth for large binaries."""
     r = _route_if_remote(f, "call_graph", identifier=identifier,
                          depth=depth, direction=direction)
@@ -17,10 +18,12 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
     try:
         root = resolve_identifier(identifier)
         root = _func_start(root) or root
-        if direction not in ("callees", "callers", "both"):
-            return format_output({"error": {"code": "INVALID_PARAM",
-                "message": "direction must be callees/callers/both"}})
-        depth = max(1, min(depth, CALLGRAPH_MAX_DEPTH))
+        if (not isinstance(direction, str)
+                or direction not in ("callees", "callers", "both")):
+            raise IDAError(
+                "INVALID_PARAM", "direction must be callees/callers/both")
+        depth = _validate_positive_int(
+            depth, "depth", CALLGRAPH_MAX_DEPTH)
 
         nodes = {}
         edges = []
@@ -81,12 +84,13 @@ def call_graph(identifier: str, depth: int = 2, direction: str = "callees",
         return error_result(e)
 
 
-@mcp.tool()
-def function_reachability(source: str, target: str, max_depth: int = 6,
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def function_reachability(source: str, target: str,
+                          max_depth: ReachabilityDepth = 6,
                           f: str = None) -> str:
     """Determine whether the source function can reach the target function via
     call edges, and return one call path if so. Both accept name, hex address,
-    or integer. Uses bounded BFS; increase max_depth for deep call chains."""
+    or address string. Uses bounded BFS; increase max_depth for deep call chains."""
     r = _route_if_remote(f, "function_reachability",
                          source=source, target=target, max_depth=max_depth)
     if r: return r
@@ -94,9 +98,10 @@ def function_reachability(source: str, target: str, max_depth: int = 6,
         src = _func_start(resolve_identifier(source))
         dst = _func_start(resolve_identifier(target))
         if src is None or dst is None:
-            return format_output({"error": {"code": "NO_FUNCTION",
-                "message": "source or target is not inside a function"}})
-        max_depth = max(1, min(max_depth, CALLGRAPH_MAX_DEPTH + 5))
+            raise IDAError(
+                "NO_FUNCTION", "source or target is not inside a function")
+        max_depth = _validate_positive_int(
+            max_depth, "max_depth", CALLGRAPH_MAX_DEPTH + 5)
 
         from collections import deque
         visited = {src}

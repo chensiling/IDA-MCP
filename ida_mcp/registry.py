@@ -4,10 +4,14 @@ import threading
 
 class FileEntry:
     __slots__ = ('fid', 'name', 'arch', 'bits', 'path', 'pid', 'conn',
-                 'local', 'call_port')
+                 'local', 'call_port', 'protocol_version',
+                 'implementation_version', 'tool_manifest_sha256',
+                 'read_only', '_capabilities')
 
     def __init__(self, fid, name, arch, bits, path, pid, conn=None,
-                 local=False, call_port=0):
+                 local=False, call_port=0, *, protocol_version,
+                 implementation_version, tool_manifest_sha256, read_only,
+                 capabilities):
         self.fid = fid
         self.name = name
         self.arch = arch
@@ -17,6 +21,29 @@ class FileEntry:
         self.conn = conn
         self.local = local
         self.call_port = call_port
+        self.protocol_version = protocol_version
+        self.implementation_version = implementation_version
+        self.tool_manifest_sha256 = tool_manifest_sha256
+        self.read_only = read_only
+        self._capabilities = dict(capabilities)
+
+    @property
+    def capabilities(self):
+        return dict(self._capabilities)
+
+    def public_metadata(self):
+        return {
+            'fid': self.fid,
+            'name': self.name,
+            'arch': self.arch,
+            'bits': self.bits,
+            'path': self.path,
+            'read_only': self.read_only,
+            'capabilities': dict(self._capabilities),
+            'protocol_version': self.protocol_version,
+            'implementation_version': self.implementation_version,
+            'tool_manifest_sha256': self.tool_manifest_sha256,
+        }
 
 
 class Registry:

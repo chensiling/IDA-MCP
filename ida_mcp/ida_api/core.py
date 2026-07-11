@@ -25,6 +25,7 @@ import ida_idp
 import ida_loader
 import ida_frame
 import ida_ida
+import ida_auto
 import ida_ua
 import idautils
 import idc

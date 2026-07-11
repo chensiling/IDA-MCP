@@ -4,7 +4,7 @@
 from .._base import *  # noqa: F401,F403
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_TOOL)
 def rename(identifier: str, new_name: str, f: str = None) -> str:
     """Rename a function, global variable, or address. Returns the old and new
     names on success. On name conflict, suggests an alternative name — no need to
@@ -29,13 +29,13 @@ def rename(identifier: str, new_name: str, f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
-def get_comment(identifier: str, position: str = "line",
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def get_comment(identifier: str, position: CommentPosition = "line",
                 repeatable: bool = False, f: str = None) -> str:
     """Read a comment. position: 'line' (regular comment at an address, shown in
     both disassembly and pseudocode), 'function' (whole-function comment),
     'anterior' (lines above), or 'posterior' (lines below). identifier accepts a
-    name, hex address, or integer."""
+    name or address string."""
     r = _route_if_remote(f, "get_comment", identifier=identifier,
                          position=position, repeatable=repeatable)
     if r: return r
@@ -64,13 +64,14 @@ def get_comment(identifier: str, position: str = "line",
         return error_result(e)
 
 
-@mcp.tool()
-def set_comment(identifier: str, comment: str, position: str = "line",
+@mcp.tool(annotations=WRITE_TOOL)
+def set_comment(identifier: str, comment: str,
+                position: CommentPosition = "line",
                 repeatable: bool = False, f: str = None) -> str:
     """Set a comment. position: 'line' (regular comment at an address, appears in
     disassembly and pseudocode), 'function' (whole-function comment), 'anterior'
     (lines above the address), or 'posterior' (lines below). Empty comment
-    deletes. identifier accepts a name, hex address, or integer."""
+    deletes. identifier accepts a name or address string."""
     r = _route_if_remote(f, "set_comment", identifier=identifier,
                          comment=comment, position=position,
                          repeatable=repeatable)
@@ -93,7 +94,7 @@ def set_comment(identifier: str, comment: str, position: str = "line",
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_TOOL)
 def patch_bytes(identifier: str, hex_bytes: str, f: str = None) -> str:
     """Patch bytes in the IDA database (does NOT modify the original binary file).
     Returns old and new bytes for verification. Use with caution — patches are
@@ -105,13 +106,12 @@ def patch_bytes(identifier: str, hex_bytes: str, f: str = None) -> str:
         ea = resolve_identifier(identifier)
         cleaned = hex_bytes.replace(" ", "")
         if len(cleaned) % 2 != 0:
-            return format_output({"error": {"code": "INVALID_PARAM",
-                                  "message": "hex_bytes must have even length"}})
+            raise IDAError(
+                "INVALID_PARAM", "hex_bytes must have even length")
         try:
             bytes.fromhex(cleaned)
         except ValueError:
-            return format_output({"error": {"code": "INVALID_PARAM",
-                                  "message": "hex_bytes is not valid hex"}})
+            raise IDAError("INVALID_PARAM", "hex_bytes is not valid hex")
         result = api.patch_bytes(ea, cleaned)
         return format_output({"success": True, "address": ea_to_hex(ea),
                               "old_bytes": result["old_bytes"],
@@ -121,10 +121,10 @@ def patch_bytes(identifier: str, hex_bytes: str, f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_TOOL)
 def undefine(identifier: str, f: str = None) -> str:
     """Convert the instruction or data at an address back to undefined bytes.
-    identifier accepts a name, hex address, or integer. Use before redefining a
+    identifier accepts a name or address string. Use before redefining a
     region (e.g. make_code / make_data)."""
     r = _route_if_remote(f, "undefine", identifier=identifier)
     if r: return r
@@ -137,10 +137,10 @@ def undefine(identifier: str, f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_TOOL)
 def make_code(identifier: str, f: str = None) -> str:
     """Convert bytes at an address into a disassembled instruction (code).
-    identifier accepts a name, hex address, or integer. Returns the instruction
+    identifier accepts a name or address string. Returns the instruction
     length. Use when IDA left real code as raw bytes."""
     r = _route_if_remote(f, "make_code", identifier=identifier)
     if r: return r
@@ -153,14 +153,20 @@ def make_code(identifier: str, f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
-def make_data(identifier: str, data_type: str = "dword", f: str = None) -> str:
+@mcp.tool(annotations=WRITE_TOOL)
+def make_data(identifier: str, data_type: DataType = "dword",
+              f: str = None) -> str:
     """Convert bytes at an address into a data item. data_type is one of
-    byte/word/dword/qword. identifier accepts a name, hex address, or integer."""
+    byte/word/dword/qword. identifier accepts a name or address string."""
     r = _route_if_remote(f, "make_data", identifier=identifier,
                          data_type=data_type)
     if r: return r
     try:
+        valid_types = {"byte", "word", "dword", "qword"}
+        if not isinstance(data_type, str) or data_type not in valid_types:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"data_type must be one of {sorted(valid_types)}")
         ea = resolve_identifier(identifier)
         result = api.make_data(ea, data_type)
         result["ea"] = ea_to_hex(result["ea"])
@@ -169,15 +175,21 @@ def make_data(identifier: str, data_type: str = "dword", f: str = None) -> str:
         return error_result(e)
 
 
-@mcp.tool()
-def make_string(identifier: str, str_type: str = "c", f: str = None) -> str:
+@mcp.tool(annotations=WRITE_TOOL)
+def make_string(identifier: str, str_type: StringType = "c",
+                f: str = None) -> str:
     """Convert bytes at an address into a string literal. str_type is 'c' (ASCII,
-    default) or 'unicode' (UTF-16). identifier accepts a name, hex address, or
-    integer. Returns the decoded string value."""
+    default) or 'unicode' (UTF-16). identifier accepts a name or address string.
+    Returns the decoded string value."""
     r = _route_if_remote(f, "make_string", identifier=identifier,
                          str_type=str_type)
     if r: return r
     try:
+        valid_types = {"c", "unicode"}
+        if not isinstance(str_type, str) or str_type not in valid_types:
+            raise IDAError(
+                "INVALID_PARAM",
+                f"str_type must be one of {sorted(valid_types)}")
         ea = resolve_identifier(identifier)
         result = api.make_string(ea, str_type)
         result["ea"] = ea_to_hex(result["ea"])
